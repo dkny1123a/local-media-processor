@@ -1,0 +1,141 @@
+Compose now can delegate build to bake for better performances
+Just set COMPOSE_BAKE=true
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [media-processor internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.53kB done
+#1 DONE 0.0s
+
+#2 [media-processor internal] load metadata for docker.io/library/python:3.10-slim
+#2 DONE 1.2s
+
+#3 [media-processor internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [media-processor internal] load build context
+#4 transferring context: 18.89kB done
+#4 DONE 0.0s
+
+#5 [media-processor  1/12] FROM docker.io/library/python:3.10-slim@sha256:fa184fce49c170a8b1032a4f752f9fe1a7e463e7f5795a3952ca275e166fa913
+#5 resolve docker.io/library/python:3.10-slim@sha256:fa184fce49c170a8b1032a4f752f9fe1a7e463e7f5795a3952ca275e166fa913 0.0s done
+#5 DONE 0.0s
+
+#6 [media-processor  4/12] RUN mkdir -p /app/models
+#6 CACHED
+
+#7 [media-processor  5/12] COPY requirements.txt .
+#7 CACHED
+
+#8 [media-processor  2/12] WORKDIR /app
+#8 CACHED
+
+#9 [media-processor  6/12] RUN pip install --no-cache-dir setuptools wheel
+#9 CACHED
+
+#10 [media-processor  3/12] RUN apt-get update && apt-get install -y     ffmpeg     libsndfile1     libgl1     libglib2.0-0     git     wget     unzip     gcc     g++     libgomp1     && rm -rf /var/lib/apt/lists/*
+#10 CACHED
+
+#11 [media-processor  7/12] RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#11 CACHED
+
+#12 [media-processor  8/12] RUN pip install --no-cache-dir -r requirements.txt
+#12 0.854 Collecting fastapi==0.104.1
+#12 1.252   Downloading fastapi-0.104.1-py3-none-any.whl (92 kB)
+#12 1.330      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 92.9/92.9 kB 2.2 MB/s eta 0:00:00
+#12 1.513 Collecting uvicorn==0.24.0
+#12 1.654   Downloading uvicorn-0.24.0-py3-none-any.whl (59 kB)
+#12 1.663      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 59.6/59.6 kB 11.4 MB/s eta 0:00:00
+#12 1.772 Collecting python-multipart==0.0.6
+#12 1.849   Downloading python_multipart-0.0.6-py3-none-any.whl (45 kB)
+#12 1.855      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 45.7/45.7 kB 27.8 MB/s eta 0:00:00
+#12 1.963 Collecting librosa==0.10.1
+#12 2.040   Downloading librosa-0.10.1-py3-none-any.whl (253 kB)
+#12 2.087      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 253.7/253.7 kB 5.6 MB/s eta 0:00:00
+#12 2.271 Collecting soundfile==0.12.1
+#12 2.350   Downloading soundfile-0.12.1-py2.py3-none-any.whl (24 kB)
+#12 2.813 Collecting pillow==10.1.0
+#12 2.885   Downloading Pillow-10.1.0-cp310-cp310-manylinux_2_28_aarch64.whl (3.5 MB)
+#12 3.351      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.5/3.5 MB 7.6 MB/s eta 0:00:00
+#12 3.895 Collecting numpy==1.26.3
+#12 3.976   Downloading numpy-1.26.3-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl (14.2 MB)
+#12 5.932      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.2/14.2 MB 7.2 MB/s eta 0:00:00
+#12 6.058 Collecting ffmpeg-python==0.2.0
+#12 6.137   Downloading ffmpeg_python-0.2.0-py3-none-any.whl (25 kB)
+#12 6.577 Collecting scipy==1.11.4
+#12 6.661   Downloading scipy-1.11.4-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl (32.9 MB)
+#12 10.44      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 32.9/32.9 MB 11.3 MB/s eta 0:00:00
+#12 10.64 Collecting rembg==2.0.57
+#12 10.72   Downloading rembg-2.0.57-py3-none-any.whl (33 kB)
+#12 10.96 Collecting opencv-python==4.8.1.78
+#12 11.04   Downloading opencv_python-4.8.1.78-cp37-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl (41.0 MB)
+#12 14.71      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 41.0/41.0 MB 11.9 MB/s eta 0:00:00
+#12 14.99 Collecting transformers==4.35.2
+#12 15.07   Downloading transformers-4.35.2-py3-none-any.whl (7.9 MB)
+#12 15.74      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 7.9/7.9 MB 12.0 MB/s eta 0:00:00
+#12 16.04 Collecting torch==2.1.2
+#12 16.12   Downloading torch-2.1.2-cp310-cp310-manylinux2014_aarch64.whl (84.1 MB)
+#12 23.12      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 84.1/84.1 MB 12.2 MB/s eta 0:00:00
+#12 23.53 Collecting torchvision==0.16.2
+#12 23.61   Downloading torchvision-0.16.2-cp310-cp310-manylinux2014_aarch64.whl (14.0 MB)
+#12 24.81      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.0/14.0 MB 11.9 MB/s eta 0:00:00
+#12 25.00 Collecting accelerate==0.25.0
+#12 25.08   Downloading accelerate-0.25.0-py3-none-any.whl (265 kB)
+#12 25.12      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 265.7/265.7 kB 6.8 MB/s eta 0:00:00
+#12 25.23 Collecting openai-whisper==20231117
+#12 25.31   Downloading openai-whisper-20231117.tar.gz (798 kB)
+#12 25.37      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 798.6/798.6 kB 12.8 MB/s eta 0:00:00
+#12 25.41   Installing build dependencies: started
+#12 28.79   Installing build dependencies: finished with status 'done'
+#12 28.79   Getting requirements to build wheel: started
+#12 28.90   Getting requirements to build wheel: finished with status 'error'
+#12 28.90   error: subprocess-exited-with-error
+#12 28.90   
+#12 28.90   × Getting requirements to build wheel did not run successfully.
+#12 28.90   │ exit code: 1
+#12 28.90   ╰─> [17 lines of output]
+#12 28.90       Traceback (most recent call last):
+#12 28.90         File "/usr/local/lib/python3.10/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 353, in <module>
+#12 28.90           main()
+#12 28.90         File "/usr/local/lib/python3.10/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 335, in main
+#12 28.90           json_out['return_val'] = hook(**hook_input['kwargs'])
+#12 28.90         File "/usr/local/lib/python3.10/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py", line 118, in get_requires_for_build_wheel
+#12 28.90           return hook(config_settings)
+#12 28.90         File "/tmp/pip-build-env-1izfr838/overlay/lib/python3.10/site-packages/setuptools/build_meta.py", line 333, in get_requires_for_build_wheel
+#12 28.90           return self._get_build_requires(config_settings, requirements=[])
+#12 28.90         File "/tmp/pip-build-env-1izfr838/overlay/lib/python3.10/site-packages/setuptools/build_meta.py", line 301, in _get_build_requires
+#12 28.90           self.run_setup()
+#12 28.90         File "/tmp/pip-build-env-1izfr838/overlay/lib/python3.10/site-packages/setuptools/build_meta.py", line 520, in run_setup
+#12 28.90           super().run_setup(setup_script=setup_script)
+#12 28.90         File "/tmp/pip-build-env-1izfr838/overlay/lib/python3.10/site-packages/setuptools/build_meta.py", line 317, in run_setup
+#12 28.90           exec(code, locals())
+#12 28.90         File "<string>", line 5, in <module>
+#12 28.90       ModuleNotFoundError: No module named 'pkg_resources'
+#12 28.90       [end of output]
+#12 28.90   
+#12 28.90   note: This error originates from a subprocess, and is likely not a problem with pip.
+#12 28.90 error: subprocess-exited-with-error
+#12 28.90 
+#12 28.90 × Getting requirements to build wheel did not run successfully.
+#12 28.90 │ exit code: 1
+#12 28.90 ╰─> See above for output.
+#12 28.90 
+#12 28.90 note: This error originates from a subprocess, and is likely not a problem with pip.
+#12 29.34 
+#12 29.34 [notice] A new release of pip is available: 23.0.1 -> 26.1.2
+#12 29.34 [notice] To update, run: pip install --upgrade pip
+#12 ERROR: process "/bin/sh -c pip install --no-cache-dir -r requirements.txt" did not complete successfully: exit code: 1
+------
+ > [media-processor  8/12] RUN pip install --no-cache-dir -r requirements.txt:
+28.90 error: subprocess-exited-with-error
+28.90 
+28.90 × Getting requirements to build wheel did not run successfully.
+28.90 │ exit code: 1
+28.90 ╰─> See above for output.
+28.90 
+28.90 note: This error originates from a subprocess, and is likely not a problem with pip.
+29.34 
+29.34 [notice] A new release of pip is available: 23.0.1 -> 26.1.2
+29.34 [notice] To update, run: pip install --upgrade pip
+------
+failed to solve: process "/bin/sh -c pip install --no-cache-dir -r requirements.txt" did not complete successfully: exit code: 1

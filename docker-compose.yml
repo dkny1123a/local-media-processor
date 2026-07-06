@@ -1,0 +1,92 @@
+services:
+  # Redis 服务 - 用于任务队列和结果存储
+  redis:
+    image: redis:7-alpine
+    container_name: media-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    networks:
+      - media-processor-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Celery Worker - 任务处理工作进程
+  celery-worker:
+    build: .
+    container_name: media-celery-worker
+    command: celery -A backend.task_queue worker --loglevel=info --concurrency=2 --max-tasks-per-child=50
+    volumes:
+      - ./backend:/app/backend
+      - ./uploads:/app/uploads
+      - ./output:/app/output
+      - ./models:/app/models
+      - /Users/donghuiwang:/Users/donghuiwang
+      - /Volumes:/Volumes
+      - /tmp:/tmp
+    environment:
+      - PYTHONPATH=/app
+      - UPLOAD_DIR=/app/uploads
+      - OUTPUT_DIR=/app/output
+      - CELERY_BROKER=redis://redis:6379/0
+      - CELERY_BACKEND=redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - media-processor-network
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import redis; r = redis.Redis(host='redis', port=6379); r.ping()\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # 主应用服务
+  media-processor:
+    build: .
+    container_name: local-media-processor
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+      - ./uploads:/app/uploads
+      - ./output:/app/output
+      - ./models:/app/models
+      - /Users/donghuiwang:/Users/donghuiwang
+      - /Volumes:/Volumes
+      - /tmp:/tmp
+    environment:
+      - PYTHONPATH=/app
+      - UPLOAD_DIR=/app/uploads
+      - OUTPUT_DIR=/app/output
+      - CELERY_BROKER=redis://redis:6379/0
+      - CELERY_BACKEND=redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - media-processor-network
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  redis_data:
+    driver: local
+
+networks:
+  media-processor-network:
+    driver: bridge

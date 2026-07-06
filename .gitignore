@@ -1,0 +1,10 @@
+*.pyc
+__pycache__/
+*.log
+output/
+uploads/
+.DS_Store
+.env
+*.tar.gz
+*.zip
+*.rar
