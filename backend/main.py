@@ -729,6 +729,41 @@ async def download_file(filename: str):
         '.3gp': 'audio/3gpp'
     }
     
+    async def cleanup_after_download():
+        await asyncio.sleep(5)
+        try:
+            abs_output_dir = os.path.abspath(OUTPUT_DIR)
+            abs_upload_dir = os.path.abspath(UPLOAD_DIR)
+            
+            abs_file_path = os.path.abspath(file_path)
+            if abs_output_dir != os.path.commonpath([abs_output_dir, abs_file_path]):
+                print(f"[清理] 输出文件不在允许目录内，跳过删除: {file_path}")
+                return
+            
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print(f"[清理] 下载完成后删除输出文件: {decoded_filename}")
+                
+                base_name = os.path.splitext(decoded_filename)[0].replace('_processed', '').replace('_audio', '')
+                if base_name:
+                    for f in os.listdir(UPLOAD_DIR):
+                        if f.endswith(base_name) or base_name in f:
+                            upload_path = os.path.join(UPLOAD_DIR, f)
+                            abs_upload_path = os.path.abspath(upload_path)
+                            
+                            if abs_upload_dir != os.path.commonpath([abs_upload_dir, abs_upload_path]):
+                                print(f"[清理] 上传文件不在允许目录内，跳过删除: {upload_path}")
+                                continue
+                                
+                            if os.path.exists(upload_path):
+                                os.remove(upload_path)
+                                print(f"[清理] 下载完成后删除上传原始文件: {f}")
+                                break
+        except Exception as e:
+            print(f"[清理] 下载后清理文件失败: {e}")
+    
+    asyncio.create_task(cleanup_after_download())
+    
     return FileResponse(file_path, media_type=media_types.get(ext, "application/octet-stream"), filename=decoded_filename)
 
 @app.api_route("/api/audio/preview", methods=["GET", "HEAD"])
