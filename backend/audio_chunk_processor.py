@@ -75,6 +75,7 @@ def load_audio_chunk(file_path, sample_rate, offset, duration):
 def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction, 
                         silence_threshold, min_silence_duration, sample_rate,
                         scene='default'):
+    silence_count = 0
     from .adaptive_processor import apply_highpass_filter
     
     try:
@@ -134,6 +135,8 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                 silence_segments.append((start_frame * hop_length / sample_rate, 
                                        len(audio_chunk) / sample_rate))
         
+        silence_count = len(silence_segments)
+        
         if silence_segments:
             segments_to_keep = []
             last_end = 0
@@ -168,17 +171,17 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                 
                 audio_chunk = np.concatenate(result_segments)
         
-        return audio_chunk
+        return audio_chunk, silence_count
     except Exception:
-        return audio_chunk
+        return audio_chunk, 0
 
 
 def _chunk_worker(args):
     i, audio_chunk, highpass_cutoff, noise_reduction, silence_threshold, \
         min_silence_duration, sample_rate, result_path, scene = args
     
-    result = process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
-                                  silence_threshold, min_silence_duration, sample_rate, scene)
+    result, _ = process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
+                                     silence_threshold, min_silence_duration, sample_rate, scene)
     np.save(result_path, result)
 
 
@@ -290,7 +293,8 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
         "timeout_chunks": 0,
         "total_time": 0,
         "chunk_times": [],
-        "temp_files_created": 0
+        "temp_files_created": 0,
+        "silence_segments_removed": 0
     }
     
     start_time = time.time()
@@ -323,6 +327,28 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
             )
             
             chunk_to_save = result if success else audio_chunk
+            
+            if success:
+                frame_length = int(sample_rate * 0.02)
+                hop_length = int(sample_rate * 0.01)
+                rms = librosa.feature.rms(y=chunk_to_save, frame_length=frame_length, hop_length=hop_length)
+                db = librosa.amplitude_to_db(rms, ref=1.0)
+                silence_mask = db < silence_threshold
+                silence_segments = []
+                in_silence = False
+                start_frame = 0
+                for j, is_silent in enumerate(silence_mask[0]):
+                    if is_silent and not in_silence:
+                        in_silence = True
+                        start_frame = j
+                    elif not is_silent and in_silence:
+                        in_silence = False
+                        end_frame = j
+                        duration = (end_frame - start_frame) * hop_length / sample_rate
+                        if duration >= min_silence_duration:
+                            silence_segments.append((start_frame * hop_length / sample_rate, 
+                                                   end_frame * hop_length / sample_rate))
+                stats["silence_segments_removed"] += len(silence_segments)
             
             temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
             temp_wav.close()

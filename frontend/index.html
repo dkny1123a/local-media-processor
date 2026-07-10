@@ -1672,11 +1672,7 @@
                     <h5>📤 处理后音频</h5>
                     <div class="custom-audio-player">
                         <div class="player-controls">
-                            <button class="player-btn" id="rewind10Btn" title="后退10秒">⏪</button>
-                            <button class="player-btn" id="rewind5Btn" title="后退5秒">◀</button>
                             <button class="player-btn play" id="playPauseBtn" title="播放/暂停">▶</button>
-                            <button class="player-btn" id="forward5Btn" title="快进5秒">▶</button>
-                            <button class="player-btn" id="forward10Btn" title="快进10秒">⏩</button>
                             <div class="player-progress-container">
                                 <span class="player-time" id="currentTime">0:00</span>
                                 <div class="player-progress-bar" id="progressBar">
@@ -1691,14 +1687,12 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="audio-duration" id="processedDuration"></div>
                         <div class="waveform" id="processedWaveform" style="position: relative;">
                             <div class="waveform-progress" id="waveformProgress"></div>
                         </div>
+                        <div class="audio-duration" id="processedDuration"></div>
                     </div>
                     <audio id="processedAudio" style="display: none;">
-                    <div class="audio-duration" id="processedDuration"></div>
-                    <div class="waveform" id="processedWaveform"></div>
                 </div>
             </div>
         </div>
@@ -2039,8 +2033,8 @@
                     throw new Error(submitResult.message);
                 }
                 
-                let pollInterval = 2000;
-                let maxInterval = 10000;
+                let pollInterval = 1000;
+                let maxInterval = 5000;
                 
                 const pollProgress = async () => {
                     try {
@@ -2275,23 +2269,14 @@
             const processedAudio = document.getElementById('processedAudio');
             processedAudio.src = `/api/audio/preview?path=/app/output/${encodeURIComponent(result.processed_audio_file)}`;
             
-            await loadWaveform(`/app/output/${encodeURIComponent(result.processed_audio_file)}`, 'processedWaveform', 'processedDuration');
+            await loadWaveform(`/app/output/${result.processed_audio_file}`, 'processedWaveform', 'processedDuration');
             
             initAudioPlayer();
         }
 
-        let audioPlayerInitialized = false;
-
         function initAudioPlayer() {
-            if (audioPlayerInitialized) return;
-            audioPlayerInitialized = true;
-
             const audio = document.getElementById('processedAudio');
             const playPauseBtn = document.getElementById('playPauseBtn');
-            const rewind5Btn = document.getElementById('rewind5Btn');
-            const rewind10Btn = document.getElementById('rewind10Btn');
-            const forward5Btn = document.getElementById('forward5Btn');
-            const forward10Btn = document.getElementById('forward10Btn');
             const progressBar = document.getElementById('progressBar');
             const progressFill = document.getElementById('progressFill');
             const currentTimeEl = document.getElementById('currentTime');
@@ -2299,11 +2284,22 @@
             const volumeSlider = document.getElementById('volumeSlider');
             const volumeFill = document.getElementById('volumeFill');
             const volumeIcon = document.getElementById('volumeIcon');
+            const waveformContainer = document.getElementById('processedWaveform');
             const waveformProgress = document.getElementById('waveformProgress');
 
+            audio.currentTime = 0;
+            progressFill.style.width = '0%';
+            if (waveformProgress) waveformProgress.style.width = '0%';
+            currentTimeEl.textContent = '0:00';
+            playPauseBtn.textContent = '▶';
+
             function formatTime(seconds) {
-                const mins = Math.floor(seconds / 60);
+                const hours = Math.floor(seconds / 3600);
+                const mins = Math.floor((seconds % 3600) / 60);
                 const secs = Math.floor(seconds % 60);
+                if (hours > 0) {
+                    return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                }
                 return `${mins}:${secs.toString().padStart(2, '0')}`;
             }
 
@@ -2311,7 +2307,7 @@
                 if (audio.duration) {
                     const progress = (audio.currentTime / audio.duration) * 100;
                     progressFill.style.width = `${progress}%`;
-                    waveformProgress.style.width = `${progress}%`;
+                    if (waveformProgress) waveformProgress.style.width = `${progress}%`;
                     currentTimeEl.textContent = formatTime(audio.currentTime);
                 }
             }
@@ -2327,64 +2323,62 @@
                 }
             }
 
-            audio.addEventListener('loadedmetadata', () => {
+            function audioLoaded() {
                 totalTimeEl.textContent = formatTime(audio.duration);
                 updateVolume();
-            });
+            }
 
-            audio.addEventListener('timeupdate', updateProgress);
-
-            audio.addEventListener('play', () => {
+            function onPlay() {
                 playPauseBtn.textContent = '⏸';
-            });
+            }
 
-            audio.addEventListener('pause', () => {
+            function onPause() {
                 playPauseBtn.textContent = '▶';
-            });
+            }
 
-            audio.addEventListener('ended', () => {
+            function onEnded() {
                 playPauseBtn.textContent = '▶';
                 progressFill.style.width = '0%';
-                waveformProgress.style.width = '0%';
+                if (waveformProgress) waveformProgress.style.width = '0%';
                 currentTimeEl.textContent = '0:00';
-            });
+            }
 
-            playPauseBtn.addEventListener('click', () => {
+            audio.addEventListener('loadedmetadata', audioLoaded);
+            audio.addEventListener('timeupdate', updateProgress);
+            audio.addEventListener('play', onPlay);
+            audio.addEventListener('pause', onPause);
+            audio.addEventListener('ended', onEnded);
+
+            playPauseBtn.onclick = function(e) {
+                e.stopPropagation();
                 if (audio.paused) {
                     audio.play();
                 } else {
                     audio.pause();
                 }
-            });
+            };
 
-            rewind5Btn.addEventListener('click', () => {
-                audio.currentTime = Math.max(0, audio.currentTime - 5);
-            });
-
-            rewind10Btn.addEventListener('click', () => {
-                audio.currentTime = Math.max(0, audio.currentTime - 10);
-            });
-
-            forward5Btn.addEventListener('click', () => {
-                audio.currentTime = Math.min(audio.duration, audio.currentTime + 5);
-            });
-
-            forward10Btn.addEventListener('click', () => {
-                audio.currentTime = Math.min(audio.duration, audio.currentTime + 10);
-            });
-
-            progressBar.addEventListener('click', (e) => {
+            progressBar.onclick = function(e) {
+                e.stopPropagation();
                 const rect = progressBar.getBoundingClientRect();
-                const percent = (e.clientX - rect.left) / rect.width;
+                const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
                 audio.currentTime = percent * audio.duration;
-            });
+            };
 
-            volumeSlider.addEventListener('click', (e) => {
+            waveformContainer.onclick = function(e) {
+                e.stopPropagation();
+                const rect = waveformContainer.getBoundingClientRect();
+                const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                audio.currentTime = percent * audio.duration;
+            };
+
+            volumeSlider.onclick = function(e) {
+                e.stopPropagation();
                 const rect = volumeSlider.getBoundingClientRect();
-                const percent = (e.clientX - rect.left) / rect.width;
-                audio.volume = Math.max(0, Math.min(1, percent));
+                const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                audio.volume = percent;
                 updateVolume();
-            });
+            };
 
             audio.volume = 0.8;
             updateVolume();
@@ -2394,7 +2388,10 @@
             try {
                 const response = await fetch('/api/audio/waveform', {
                     method: 'POST',
-                    body: new URLSearchParams({ input_path: path })
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `input_path=${encodeURIComponent(path)}`
                 });
                 const data = await response.json();
                 
@@ -2403,6 +2400,8 @@
                     if (durationId) {
                         document.getElementById(durationId).textContent = formatDuration(data.duration);
                     }
+                } else {
+                    console.error('波形图加载失败:', data.error || '未知错误');
                 }
             } catch (error) {
                 console.error('加载波形失败:', error);
@@ -2411,7 +2410,11 @@
 
         function renderWaveform(data, elementId) {
             const container = document.getElementById(elementId);
+            const progressBar = container.querySelector('.waveform-progress');
             container.innerHTML = '';
+            if (progressBar) {
+                container.appendChild(progressBar);
+            }
             
             data.forEach(value => {
                 const bar = document.createElement('div');

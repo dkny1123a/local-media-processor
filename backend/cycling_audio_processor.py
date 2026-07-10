@@ -228,6 +228,7 @@ def apply_bluetooth_optimization(audio_data: np.ndarray, sample_rate: int) -> np
 def process_single_cycling_chunk(audio_chunk, sample_rate, noise_reduction, 
                                  silence_threshold, min_silence_duration, 
                                  highpass_cutoff):
+    silence_count = 0
     try:
         audio_chunk = apply_bandpass_filter(audio_chunk, sample_rate)
         audio_chunk = apply_voice_enhancement(audio_chunk, sample_rate)
@@ -247,6 +248,7 @@ def process_single_cycling_chunk(audio_chunk, sample_rate, noise_reduction,
                 pass
         
         voice_segments = detect_voice_activity(audio_chunk, sample_rate, silence_threshold, min_silence_duration)
+        silence_count = len(voice_segments)
         
         if len(voice_segments) > 0:
             segments_to_keep = []
@@ -282,10 +284,10 @@ def process_single_cycling_chunk(audio_chunk, sample_rate, noise_reduction,
                 
                 audio_chunk = np.concatenate(result_segments)
         
-        return audio_chunk
+        return audio_chunk, silence_count
     except Exception as e:
         print(f"分块处理失败: {e}")
-        return audio_chunk
+        return audio_chunk, 0
 
 
 def process_cycling_audio(
@@ -314,10 +316,15 @@ def process_cycling_audio(
     chunk_size = int(sample_rate * chunk_duration)
     num_chunks = int(np.ceil(total_samples / chunk_size))
     
-    if num_chunks > 1:
+    if num_chunks < 1:
+        num_chunks = 1
+    
+    if num_chunks >= 1:
         update_progress(5, f'分块处理({num_chunks}块)...', 'processing')
         
         processed_chunks = []
+        total_silence_removed = 0
+        
         for i in range(num_chunks):
             start = i * chunk_size
             end = min(start + chunk_size, total_samples)
@@ -326,10 +333,11 @@ def process_cycling_audio(
             progress_pct = 5 + int((i / num_chunks) * 50)
             update_progress(progress_pct, f'处理块 {i+1}/{num_chunks}...', 'processing')
             
-            processed_chunk = process_single_cycling_chunk(chunk, sample_rate, noise_reduction,
-                                                          silence_threshold, min_silence_duration,
-                                                          highpass_cutoff)
+            processed_chunk, silence_count = process_single_cycling_chunk(chunk, sample_rate, noise_reduction,
+                                                                          silence_threshold, min_silence_duration,
+                                                                          highpass_cutoff)
             processed_chunks.append(processed_chunk)
+            total_silence_removed += silence_count
             
             del chunk
             import gc
@@ -338,68 +346,8 @@ def process_cycling_audio(
         audio_data = np.concatenate(processed_chunks)
         del processed_chunks
         gc.collect()
-    else:
-        update_progress(5, '应用带通滤波（300Hz-3400Hz）...', 'processing')
-        audio_data = apply_bandpass_filter(audio_data, sample_rate)
         
-        update_progress(15, '应用语音增强...', 'processing')
-        audio_data = apply_voice_enhancement(audio_data, sample_rate)
-        
-        update_progress(25, '应用动态范围压缩...', 'processing')
-        audio_data = apply_dynamic_range_compression(audio_data, sample_rate)
-        
-        update_progress(35, '应用清晰度增强...', 'processing')
-        audio_data = apply_intelligibility_boost(audio_data, sample_rate)
-        
-        update_progress(45, '降噪处理...', 'processing')
-        if noise_reduction > 0:
-            try:
-                import noisereduce as nr
-                reduced_chunk = nr.reduce_noise(
-                    y=audio_data,
-                    sr=sample_rate,
-                    prop_decrease=noise_reduction
-                )
-                audio_data = audio_data * (1 - noise_reduction) + reduced_chunk * noise_reduction
-            except Exception:
-                pass
-        
-        update_progress(60, '语音活动检测...', 'processing')
-        voice_segments = detect_voice_activity(audio_data, sample_rate, silence_threshold, min_silence_duration)
-        
-        if len(voice_segments) > 0:
-            segments_to_keep = []
-            last_end = 0
-            
-            for start, end in voice_segments:
-                if start > last_end + min_silence_duration:
-                    segments_to_keep.append((last_end, start))
-                segments_to_keep.append((start, end))
-                last_end = end
-            
-            if last_end < len(audio_data) / sample_rate:
-                segments_to_keep.append((last_end, len(audio_data) / sample_rate))
-            
-            if segments_to_keep:
-                result_segments = []
-                soft_boundary_samples = int(sample_rate * 50 / 1000)
-                
-                for start, end in segments_to_keep:
-                    start_sample = int(start * sample_rate)
-                    end_sample = int(end * sample_rate)
-                    
-                    segment = audio_data[start_sample:end_sample]
-                    
-                    if len(segment) > soft_boundary_samples * 2:
-                        fade_in = np.linspace(0, 1, soft_boundary_samples)
-                        fade_out = np.linspace(1, 0, soft_boundary_samples)
-                        
-                        segment[:soft_boundary_samples] = segment[:soft_boundary_samples] * fade_in
-                        segment[-soft_boundary_samples:] = segment[-soft_boundary_samples:] * fade_out
-                    
-                    result_segments.append(segment)
-                
-                audio_data = np.concatenate(result_segments)
+        stats['silence_segments_removed'] = total_silence_removed
     
     update_progress(80, '蓝牙优化（降采样至16kHz）...', 'processing')
     audio_data, sample_rate = apply_bluetooth_optimization(audio_data, sample_rate)
@@ -441,4 +389,11 @@ def process_cycling_audio(
     
     stats['processed_duration'] = round(len(audio_data) / sample_rate, 2)
     
-    return audio_data, stats, sample_rate
+    temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+    temp_path = temp_wav.name
+    temp_wav.close()
+    
+    import soundfile as sf
+    sf.write(temp_path, audio_data, sample_rate)
+    
+    return audio_data, stats, temp_path

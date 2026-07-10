@@ -291,7 +291,7 @@ def process_audio_background(
         update_progress(task_id, 'loading', '正在获取音频信息...', 15)
         
         try:
-            total_duration = librosa.get_duration(filename=converted_path)
+            total_duration = librosa.get_duration(path=converted_path)
             sr_result = librosa.get_samplerate(converted_path)
         except:
             total_duration = 300
@@ -335,118 +335,104 @@ def process_audio_background(
         converted_path_again, was_converted_again = convert_to_wav(input_path)
         
         temp_wav_path = None
+        cycling_stats = None
         
         update_progress(task_id, 'processing', '骑行+蓝牙场景专用处理...', 25)
         
-        def progress_callback(msg, pct):
+        def progress_callback(pct, msg, status=None):
             update_progress(task_id, 'processing', msg, 25 + int(pct * 0.5))
         
-        processed_audio, stats, temp_wav_path = process_audio_chunks(
-            converted_path_again, sample_rate, chunk_duration,
-            highpass_cutoff, noise_reduction, silence_threshold, min_silence_duration,
-            progress_callback=progress_callback, task_name=f"Task {task_id}", scene='cycling_bluetooth'
-        )
-        
-        update_progress(task_id, 'processing', '骑行+蓝牙优化（双重语音增强）...', 75)
-        
-        import numpy as np
-        import soundfile as sf
-        from .cycling_audio_processor import apply_bandpass_filter, apply_voice_enhancement
-        from .cycling_audio_processor import apply_dynamic_range_compression, apply_intelligibility_boost
-        
-        enhanced_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-        enhanced_wav.close()
-        enhanced_path = enhanced_wav.name
-        
-        block_size = int(sample_rate * 30)
-        
-        with sf.SoundFile(temp_wav_path, 'r') as f:
-            total_frames = f.frames
-            processed_frames = 0
-            
-            with sf.SoundFile(enhanced_path, 'w', samplerate=f.samplerate, channels=f.channels) as out_f:
-                while processed_frames < total_frames:
-                    remaining = total_frames - processed_frames
-                    read_size = min(block_size, remaining)
-                    
-                    audio_block = f.read(read_size)
-                    
-                    if audio_block.ndim > 1:
-                        audio_block = np.mean(audio_block, axis=1)
-                    
-                    audio_block = apply_bandpass_filter(audio_block, sample_rate)
-                    audio_block = apply_voice_enhancement(audio_block, sample_rate)
-                    audio_block = apply_dynamic_range_compression(audio_block, sample_rate)
-                    audio_block = apply_intelligibility_boost(audio_block, sample_rate)
-                    audio_block = apply_bandpass_filter(audio_block, sample_rate)
-                    audio_block = apply_voice_enhancement(audio_block, sample_rate)
-                    
-                    out_f.write(audio_block)
-                    
-                    del audio_block
-                    gc.collect()
-                    
-                    processed_frames += read_size
-                    progress_pct = 75 + int((processed_frames / total_frames) * 10)
-                    update_progress(task_id, 'processing', f'双重语音增强: {int(processed_frames / total_frames * 100)}%', progress_pct)
-        
-        os.unlink(temp_wav_path)
-        temp_wav_path = enhanced_path
-        
-        update_progress(task_id, 'processing', '蓝牙优化（降采样至16kHz）...', 85)
-        
-        optimized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-        optimized_wav.close()
-        optimized_path = optimized_wav.name
-        
-        command = [
-            'ffmpeg',
-            '-i', temp_wav_path,
-            '-ac', '1',
-            '-ar', '16000',
-            '-y',
-            '-loglevel', 'quiet',
-            optimized_path
-        ]
-        
         try:
-            subprocess.run(command, check=True, capture_output=True, timeout=300)
-            os.unlink(temp_wav_path)
-            temp_wav_path = optimized_path
+            import librosa
+            audio_data, sr = librosa.load(converted_path_again, sr=sample_rate, mono=True)
+            
+            processed_audio, cycling_stats, temp_wav_path = process_cycling_audio(
+                audio_data, sample_rate,
+                noise_reduction=noise_reduction,
+                silence_threshold=silence_threshold,
+                min_silence_duration=min_silence_duration,
+                highpass_cutoff=highpass_cutoff,
+                max_volume=max_volume,
+                target_db=target_db,
+                progress_callback=progress_callback
+            )
+            
+            del audio_data
+            gc.collect()
+            
             sample_rate = 16000
-        except subprocess.TimeoutExpired:
-            print(f"[Task {task_id}] 降采样超时")
-            os.unlink(optimized_path)
-        except:
-            os.unlink(optimized_path)
+        except Exception as e:
+            print(f"[Task {task_id}] 统一处理失败，回退到分块处理: {e}")
+            
+            def fallback_progress_callback(msg, pct):
+                update_progress(task_id, 'processing', msg, 25 + int(pct * 0.5))
+            
+            processed_audio, stats, temp_wav_path = process_audio_chunks(
+                converted_path_again, sample_rate, chunk_duration,
+                highpass_cutoff, noise_reduction, silence_threshold, min_silence_duration,
+                progress_callback=fallback_progress_callback, task_name=f"Task {task_id}", scene='cycling_bluetooth'
+            )
         
-        if was_converted_again and os.path.exists(converted_path_again):
-            os.unlink(converted_path_again)
-        
-        if max_volume and temp_wav_path:
-            update_progress(task_id, 'processing', '正在调整音量...', 75)
-            normalized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            normalized_wav.close()
-            normalized_path = normalized_wav.name
+        if cycling_stats is None:
+            update_progress(task_id, 'processing', '蓝牙优化（降采样至16kHz）...', 85)
+            
+            optimized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+            optimized_wav.close()
+            optimized_path = optimized_wav.name
             
             command = [
                 'ffmpeg',
                 '-i', temp_wav_path,
-                '-af', f'loudnorm=I={target_db}:LRA=11:TP=-1.5',
+                '-ac', '1',
+                '-ar', '16000',
                 '-y',
                 '-loglevel', 'quiet',
-                normalized_path
+                optimized_path
             ]
             
             try:
                 subprocess.run(command, check=True, capture_output=True, timeout=300)
                 os.unlink(temp_wav_path)
-                temp_wav_path = normalized_path
+                temp_wav_path = optimized_path
+                sample_rate = 16000
             except subprocess.TimeoutExpired:
-                print(f"[Task {task_id}] 音量调整超时")
-                os.unlink(normalized_path)
+                print(f"[Task {task_id}] 降采样超时")
+                os.unlink(optimized_path)
             except:
-                os.unlink(normalized_path)
+                os.unlink(optimized_path)
+            
+            if was_converted_again and os.path.exists(converted_path_again):
+                os.unlink(converted_path_again)
+            
+            if max_volume and temp_wav_path:
+                update_progress(task_id, 'processing', '正在调整音量...', 75)
+                normalized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                normalized_wav.close()
+                normalized_path = normalized_wav.name
+                
+                command = [
+                    'ffmpeg',
+                    '-i', temp_wav_path,
+                    '-af', f'loudnorm=I={target_db}:LRA=11:TP=-1.5',
+                    '-y',
+                    '-loglevel', 'quiet',
+                    normalized_path
+                ]
+                
+                try:
+                    subprocess.run(command, check=True, capture_output=True, timeout=300)
+                    os.unlink(temp_wav_path)
+                    temp_wav_path = normalized_path
+                except subprocess.TimeoutExpired:
+                    print(f"[Task {task_id}] 音量调整超时")
+                    os.unlink(normalized_path)
+                except:
+                    os.unlink(normalized_path)
+        else:
+            if was_converted_again and os.path.exists(converted_path_again):
+                os.unlink(converted_path_again)
+        
+        silence_segments_removed = cycling_stats.get('silence_segments_removed', 0) if cycling_stats else 0
         
         adaptive_result = {
             'success': True,
@@ -464,7 +450,7 @@ def process_audio_background(
             'stats': {
                 'duration': round(len(processed_audio) / sample_rate, 2) if len(processed_audio) > 0 else 0,
                 'sample_rate': sample_rate,
-                'silence_segments_removed': 0
+                'silence_segments_removed': silence_segments_removed
             }
         }
         
