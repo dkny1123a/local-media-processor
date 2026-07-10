@@ -289,13 +289,14 @@ def process_video(
             
             update_progress(0.3, '开始分块处理音频...', 'processing')
             
-            def video_chunk_progress(msg, pct, status=None):
-                update_progress(0.3 + pct * 0.5, msg, 'processing')
+            def video_chunk_progress(pct, msg, status=None):
+                update_progress(0.3 + pct * 0.005, msg, 'processing')
             
             processed_audio, stats, temp_wav_path = process_audio_chunks(
                 audio_output_path, sample_rate, chunk_duration,
                 highpass_cutoff, noise_reduction, silence_threshold, min_silence_duration,
-                progress_callback=video_chunk_progress, task_name="Video"
+                progress_callback=video_chunk_progress, task_name="Video",
+                scene=scene, adaptive_chunk=True
             )
             
             if max_volume and temp_wav_path:
@@ -321,6 +322,35 @@ def process_video(
                     os.unlink(normalized_path)
                 except:
                     os.unlink(normalized_path)
+            
+            if scene in ['cycling', 'cycling_bluetooth', 'bluetooth'] and temp_wav_path:
+                update_progress(0.88, '蓝牙优化（降采样至16kHz）...', 'processing')
+                optimized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                optimized_wav.close()
+                optimized_path = optimized_wav.name
+                
+                command = [
+                    'ffmpeg',
+                    '-i', temp_wav_path,
+                    '-ac', '1',
+                    '-ar', '16000',
+                    '-y',
+                    '-loglevel', 'quiet',
+                    optimized_path
+                ]
+                
+                try:
+                    subprocess.run(command, check=True, capture_output=True, timeout=300)
+                    os.unlink(temp_wav_path)
+                    temp_wav_path = optimized_path
+                    sample_rate = 16000
+                    print(f"[Video] 降采样完成: {sample_rate}Hz")
+                except subprocess.TimeoutExpired:
+                    print(f"[Video] 降采样超时")
+                    os.unlink(optimized_path)
+                except Exception as e:
+                    print(f"[Video] 降采样失败: {e}")
+                    os.unlink(optimized_path)
             
             update_progress(0.9, '正在编码为MP3格式...', 'processing')
             
@@ -363,12 +393,22 @@ def process_video(
             
             processed_info = get_audio_info(processed_audio_path)
             result_data["processed_info"] = processed_info
+            silence_segments_removed = stats.get('silence_segments_removed', 0) if stats else 0
+            non_voice_segments_removed = stats.get('non_voice_segments_removed', 0) if stats else 0
             result_data["processed_info"]["stats"] = {
                 'duration': processed_info.get('duration', 0),
                 'sample_rate': sample_rate,
-                'silence_segments_removed': 0
+                'silence_segments_removed': silence_segments_removed,
+                'non_voice_segments_removed': non_voice_segments_removed
             }
             result_data["analysis"] = analysis or {}
+            
+            if auto_detect and analysis:
+                adaptive_params = calculate_adaptive_parameters(analysis, scene)
+                stationary_noise = adaptive_params.get('stationary_noise', False)
+            else:
+                stationary_noise = False
+            
             result_data["applied_params"] = {
                 'noise_reduction': noise_reduction,
                 'silence_threshold': silence_threshold,
