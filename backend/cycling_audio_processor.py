@@ -8,9 +8,7 @@ from typing import Tuple, Dict, Any
 
 def apply_dynamic_range_compression(audio_data: np.ndarray, sample_rate: int, ratio: float = 4.0, threshold_db: float = -20.0) -> np.ndarray:
     try:
-        audio_normalized = audio_data / np.max(np.abs(audio_data)) if np.max(np.abs(audio_data)) > 0 else audio_data
-        
-        rms = librosa.feature.rms(y=audio_normalized)[0]
+        rms = librosa.feature.rms(y=audio_data)[0]
         rms_db = librosa.amplitude_to_db(rms, ref=1.0)
         
         gain_db = np.zeros_like(rms_db)
@@ -23,14 +21,16 @@ def apply_dynamic_range_compression(audio_data: np.ndarray, sample_rate: int, ra
         frame_length = int(sample_rate * 0.05)
         hop_length = int(sample_rate * 0.025)
         
-        compressed_audio = np.zeros_like(audio_normalized)
+        compressed_audio = np.zeros_like(audio_data)
         for i in range(len(gain)):
             start = i * hop_length
-            end = min(start + frame_length, len(audio_normalized))
-            if start < len(audio_normalized):
-                compressed_audio[start:end] = audio_normalized[start:end] * gain[i]
+            end = min(start + frame_length, len(audio_data))
+            if start < len(audio_data):
+                compressed_audio[start:end] = audio_data[start:end] * gain[i]
         
-        compressed_audio = compressed_audio / np.max(np.abs(compressed_audio)) if np.max(np.abs(compressed_audio)) > 0 else compressed_audio
+        max_val = np.max(np.abs(compressed_audio))
+        if max_val > 0.9:
+            compressed_audio = compressed_audio * 0.9 / max_val
         
         return compressed_audio
     except Exception as e:

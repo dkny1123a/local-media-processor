@@ -164,17 +164,17 @@ def calculate_adaptive_parameters(
     if signal_to_noise_ratio < 5:
         noise_reduction = 0.95
     elif signal_to_noise_ratio < 10:
-        noise_reduction = 0.85 + (signal_to_noise_ratio - 5) * (-0.02)
+        noise_reduction = 0.90 + (signal_to_noise_ratio - 5) * (-0.01)
     elif signal_to_noise_ratio < 20:
-        noise_reduction = 0.70 + (signal_to_noise_ratio - 10) * (-0.015)
+        noise_reduction = 0.82 + (signal_to_noise_ratio - 10) * (-0.008)
     elif signal_to_noise_ratio < 30:
-        noise_reduction = 0.50 + (signal_to_noise_ratio - 20) * (-0.01)
+        noise_reduction = 0.72 + (signal_to_noise_ratio - 20) * (-0.006)
     elif signal_to_noise_ratio < 40:
-        noise_reduction = 0.35 + (signal_to_noise_ratio - 30) * (-0.0075)
+        noise_reduction = 0.60 + (signal_to_noise_ratio - 30) * (-0.005)
     else:
-        noise_reduction = 0.15
+        noise_reduction = 0.45
     
-    noise_reduction = max(0.05, min(0.98, noise_reduction))
+    noise_reduction = max(0.55, min(0.98, noise_reduction))
     
     if rms_coefficient_of_variation < 0.03 and dynamic_range < 5:
         noise_reduction = max(0.05, noise_reduction * 0.3)

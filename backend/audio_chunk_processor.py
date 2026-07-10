@@ -95,17 +95,6 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
             chunk_min_silence_duration = chunk_params['min_silence_duration']
             chunk_highpass_cutoff = chunk_params['highpass_cutoff']
         
-        if scene == 'cycling' or scene == 'cycling_bluetooth':
-            from .cycling_audio_processor import apply_bandpass_filter, apply_voice_enhancement
-            from .cycling_audio_processor import apply_dynamic_range_compression, apply_intelligibility_boost
-            
-            audio_chunk = apply_bandpass_filter(audio_chunk, sample_rate)
-            audio_chunk = apply_voice_enhancement(audio_chunk, sample_rate)
-            audio_chunk = apply_dynamic_range_compression(audio_chunk, sample_rate)
-            audio_chunk = apply_intelligibility_boost(audio_chunk, sample_rate)
-        elif chunk_highpass_cutoff > 0:
-            audio_chunk = apply_highpass_filter(audio_chunk, sample_rate, chunk_highpass_cutoff)
-        
         if chunk_noise_reduction > 0:
             try:
                 import noisereduce as nr
@@ -119,6 +108,17 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                 gc.collect()
             except Exception:
                 pass
+        
+        if scene == 'cycling' or scene == 'cycling_bluetooth':
+            from .cycling_audio_processor import apply_bandpass_filter, apply_voice_enhancement
+            from .cycling_audio_processor import apply_dynamic_range_compression, apply_intelligibility_boost
+            
+            audio_chunk = apply_bandpass_filter(audio_chunk, sample_rate)
+            audio_chunk = apply_voice_enhancement(audio_chunk, sample_rate)
+            audio_chunk = apply_dynamic_range_compression(audio_chunk, sample_rate)
+            audio_chunk = apply_intelligibility_boost(audio_chunk, sample_rate)
+        elif chunk_highpass_cutoff > 0:
+            audio_chunk = apply_highpass_filter(audio_chunk, sample_rate, chunk_highpass_cutoff)
         
         frame_length = int(sample_rate * 0.02)
         hop_length = int(sample_rate * 0.01)
@@ -203,7 +203,8 @@ def _chunk_worker(args):
     result, silence_count = process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                                      silence_threshold, min_silence_duration, sample_rate, scene, adaptive_chunk)
     np.save(result_path, result)
-    np.save(result_path + '_silence', np.int64(silence_count))
+    with open(result_path + '_silence', 'w') as f:
+        f.write(str(silence_count))
 
 
 def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction, 
@@ -219,18 +220,28 @@ def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction,
     if p.is_alive():
         p.terminate()
         p.join()
-        return False, audio_chunk
+        return False, audio_chunk, 0
+    
+    silence_count = 0
+    silence_path = result_path + '_silence'
+    if os.path.exists(silence_path):
+        try:
+            with open(silence_path, 'r') as f:
+                silence_count = int(f.read())
+            os.unlink(silence_path)
+        except:
+            pass
     
     if os.path.exists(result_path):
         try:
             result = np.load(result_path)
             os.unlink(result_path)
-            return True, result
+            return True, result, silence_count
         except:
             os.unlink(result_path)
-            return False, audio_chunk
+            return False, audio_chunk, 0
     
-    return False, audio_chunk
+    return False, audio_chunk, 0
 
 
 def write_single_chunk_to_wav(chunk, sample_rate, output_path):
@@ -344,7 +355,7 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
             result_file.close()
             result_path = result_file.name
             
-            success, result = process_chunk_with_timeout(
+            success, result, silence_count = process_chunk_with_timeout(
                 i, audio_chunk, highpass_cutoff, noise_reduction,
                 silence_threshold, min_silence_duration, sample_rate, result_path, scene,
                 adaptive_chunk
@@ -354,13 +365,8 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
             
             if success:
                 stats["processed_chunks"] += 1
-                if os.path.exists(result_path + '_silence'):
-                    try:
-                        silence_count = np.load(result_path + '_silence')
-                        stats["silence_segments_removed"] += int(silence_count)
-                        os.unlink(result_path + '_silence')
-                    except:
-                        pass
+                stats["silence_segments_removed"] += silence_count
+                print(f"[{task_name}] 块 {i+1} 静音段数: {silence_count}, 累计: {stats['silence_segments_removed']}")
             else:
                 stats["timeout_chunks"] += 1
                 print(f"[{task_name}] 块 {i+1} 超时或失败，保留原始音频")
@@ -440,5 +446,7 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
           f"超时={stats['timeout_chunks']}, 跳过={stats['skipped_chunks']}, "
           f"临时文件={stats['temp_files_created']}, 总耗时={stats['total_time']:.2f}s, "
           f"平均每块={avg_time:.2f}s, 最长={max_time:.2f}s")
+    
+    print(f"[{task_name}] 静音段统计: 累计移除={stats['silence_segments_removed']}")
     
     return processed_audio, stats, temp_wav_path

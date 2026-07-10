@@ -270,7 +270,7 @@ def process_video(
                 if i == 0:
                     from .adaptive_processor import analyze_audio_characteristics, calculate_adaptive_parameters, apply_highpass_filter
                     analysis = analyze_audio_characteristics(chunk, sample_rate)
-                    print(f"[Video] 分析完成: noise_level={analysis['noise_level']}, snr={analysis['signal_to_noise_ratio']:.1f}")
+                    print(f"[Video] 分析完成: noise_floor={analysis['noise_floor_db']:.1f}dB, snr={analysis['signal_to_noise_ratio']:.1f}")
                 del chunk
                 if i == 0:
                     break
