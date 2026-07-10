@@ -313,7 +313,7 @@ def process_audio_background(
         for i, chunk in enumerate(chunk_generator()):
             if i == 0:
                 analysis = analyze_audio_characteristics(chunk, sample_rate)
-                print(f"[Task {task_id}] 分析完成: noise_level={analysis['noise_level']}, snr={analysis['signal_to_noise_ratio']:.1f}")
+                print(f"[Task {task_id}] 分析完成: noise_floor={analysis['noise_floor_db']:.1f}dB, snr={analysis['signal_to_noise_ratio']:.1f}")
             break
         
         if was_converted and os.path.exists(converted_path):
@@ -355,64 +355,62 @@ def process_audio_background(
             print(f"[Task {task_id}] 分块处理失败: {e}")
             raise
         
-        if cycling_stats is None:
-            update_progress(task_id, 'processing', '蓝牙优化（降采样至16kHz）...', 85)
-            
-            optimized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            optimized_wav.close()
-            optimized_path = optimized_wav.name
+        update_progress(task_id, 'processing', '蓝牙优化（降采样至16kHz）...', 85)
+
+        optimized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        optimized_wav.close()
+        optimized_path = optimized_wav.name
+        
+        command = [
+            'ffmpeg',
+            '-i', temp_wav_path,
+            '-ac', '1',
+            '-ar', '16000',
+            '-y',
+            '-loglevel', 'quiet',
+            optimized_path
+        ]
+        
+        try:
+            subprocess.run(command, check=True, capture_output=True, timeout=300)
+            os.unlink(temp_wav_path)
+            temp_wav_path = optimized_path
+            sample_rate = 16000
+            print(f"[Task {task_id}] 降采样完成: {sample_rate}Hz")
+        except subprocess.TimeoutExpired:
+            print(f"[Task {task_id}] 降采样超时")
+            os.unlink(optimized_path)
+        except Exception as e:
+            print(f"[Task {task_id}] 降采样失败: {e}")
+            os.unlink(optimized_path)
+        
+        if was_converted_again and os.path.exists(converted_path_again):
+            os.unlink(converted_path_again)
+        
+        if max_volume and temp_wav_path:
+            update_progress(task_id, 'processing', '正在调整音量...', 75)
+            normalized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+            normalized_wav.close()
+            normalized_path = normalized_wav.name
             
             command = [
                 'ffmpeg',
                 '-i', temp_wav_path,
-                '-ac', '1',
-                '-ar', '16000',
+                '-af', f'loudnorm=I={target_db}:LRA=11:TP=-1.5',
                 '-y',
                 '-loglevel', 'quiet',
-                optimized_path
+                normalized_path
             ]
             
             try:
                 subprocess.run(command, check=True, capture_output=True, timeout=300)
                 os.unlink(temp_wav_path)
-                temp_wav_path = optimized_path
-                sample_rate = 16000
+                temp_wav_path = normalized_path
             except subprocess.TimeoutExpired:
-                print(f"[Task {task_id}] 降采样超时")
-                os.unlink(optimized_path)
+                print(f"[Task {task_id}] 音量调整超时")
+                os.unlink(normalized_path)
             except:
-                os.unlink(optimized_path)
-            
-            if was_converted_again and os.path.exists(converted_path_again):
-                os.unlink(converted_path_again)
-            
-            if max_volume and temp_wav_path:
-                update_progress(task_id, 'processing', '正在调整音量...', 75)
-                normalized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-                normalized_wav.close()
-                normalized_path = normalized_wav.name
-                
-                command = [
-                    'ffmpeg',
-                    '-i', temp_wav_path,
-                    '-af', f'loudnorm=I={target_db}:LRA=11:TP=-1.5',
-                    '-y',
-                    '-loglevel', 'quiet',
-                    normalized_path
-                ]
-                
-                try:
-                    subprocess.run(command, check=True, capture_output=True, timeout=300)
-                    os.unlink(temp_wav_path)
-                    temp_wav_path = normalized_path
-                except subprocess.TimeoutExpired:
-                    print(f"[Task {task_id}] 音量调整超时")
-                    os.unlink(normalized_path)
-                except:
-                    os.unlink(normalized_path)
-        else:
-            if was_converted_again and os.path.exists(converted_path_again):
-                os.unlink(converted_path_again)
+                os.unlink(normalized_path)
         
         silence_segments_removed = cycling_stats.get('silence_segments_removed', 0) if cycling_stats else 0
         
