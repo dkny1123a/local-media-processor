@@ -804,8 +804,10 @@ async def download_file(filename: str):
     return FileResponse(file_path, media_type=media_types.get(ext, "application/octet-stream"), filename=decoded_filename)
 
 @app.api_route("/api/audio/preview", methods=["GET", "HEAD"])
-async def preview_audio(path: str):
+async def preview_audio(path: str, request: Request):
     import urllib.parse
+    import re
+    from starlette.responses import Response
     
     decoded_path = urllib.parse.unquote(path)
     
@@ -831,6 +833,32 @@ async def preview_audio(path: str):
         '.amr': 'audio/amr',
         '.3gp': 'audio/3gpp'
     }
+    
+    file_size = os.path.getsize(file_path)
+    range_header = request.headers.get('range')
+    
+    if range_header:
+        range_match = re.match(r'bytes=(\d+)-(\d*)', range_header)
+        if range_match:
+            start = int(range_match.group(1))
+            end = int(range_match.group(2)) if range_match.group(2) else file_size - 1
+            
+            if start >= file_size:
+                return JSONResponse({"error": "Range not satisfiable"}, status_code=416)
+            
+            end = min(end, file_size - 1)
+            chunk_size = end - start + 1
+            
+            with open(file_path, 'rb') as f:
+                f.seek(start)
+                content = f.read(chunk_size)
+            
+            headers = {
+                'Content-Range': f'bytes {start}-{end}/{file_size}',
+                'Content-Length': str(chunk_size),
+                'Accept-Ranges': 'bytes',
+            }
+            return Response(content, status_code=206, headers=headers, media_type=media_types.get(ext, "audio/mpeg"))
     
     return FileResponse(file_path, media_type=media_types.get(ext, "audio/mpeg"))
 

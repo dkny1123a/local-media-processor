@@ -248,41 +248,31 @@ def process_single_cycling_chunk(audio_chunk, sample_rate, noise_reduction,
                 pass
         
         voice_segments = detect_voice_activity(audio_chunk, sample_rate, silence_threshold, min_silence_duration)
-        silence_count = len(voice_segments)
         
         if len(voice_segments) > 0:
-            segments_to_keep = []
-            last_end = 0
+            result_segments = []
+            soft_boundary_samples = int(sample_rate * 50 / 1000)
             
             for start, end in voice_segments:
-                if start > last_end + min_silence_duration:
-                    segments_to_keep.append((last_end, start))
-                segments_to_keep.append((start, end))
-                last_end = end
-            
-            if last_end < len(audio_chunk) / sample_rate:
-                segments_to_keep.append((last_end, len(audio_chunk) / sample_rate))
-            
-            if segments_to_keep:
-                result_segments = []
-                soft_boundary_samples = int(sample_rate * 50 / 1000)
+                start_sample = int(start * sample_rate)
+                end_sample = int(end * sample_rate)
                 
-                for start, end in segments_to_keep:
-                    start_sample = int(start * sample_rate)
-                    end_sample = int(end * sample_rate)
-                    
-                    segment = audio_chunk[start_sample:end_sample]
-                    
-                    if len(segment) > soft_boundary_samples * 2:
-                        fade_in = np.linspace(0, 1, soft_boundary_samples)
-                        fade_out = np.linspace(1, 0, soft_boundary_samples)
-                        
-                        segment[:soft_boundary_samples] = segment[:soft_boundary_samples] * fade_in
-                        segment[-soft_boundary_samples:] = segment[-soft_boundary_samples:] * fade_out
-                    
-                    result_segments.append(segment)
+                segment = audio_chunk[start_sample:end_sample]
                 
-                audio_chunk = np.concatenate(result_segments)
+                if len(segment) > soft_boundary_samples * 2:
+                    fade_in = np.linspace(0, 1, soft_boundary_samples)
+                    fade_out = np.linspace(1, 0, soft_boundary_samples)
+                    
+                    segment[:soft_boundary_samples] = segment[:soft_boundary_samples] * fade_in
+                    segment[-soft_boundary_samples:] = segment[-soft_boundary_samples:] * fade_out
+                
+                result_segments.append(segment)
+            
+            audio_chunk = np.concatenate(result_segments)
+            
+            total_voice_duration = sum(end - start for start, end in voice_segments)
+            total_duration = len(audio_chunk) / sample_rate
+            silence_count = len(voice_segments) - 1 if len(voice_segments) > 1 else 0
         
         return audio_chunk, silence_count
     except Exception as e:
@@ -324,6 +314,7 @@ def process_cycling_audio(
         
         processed_chunks = []
         total_silence_removed = 0
+        last_update_pct = 0
         
         for i in range(num_chunks):
             start = i * chunk_size
@@ -331,7 +322,10 @@ def process_cycling_audio(
             chunk = audio_data[start:end]
             
             progress_pct = 5 + int((i / num_chunks) * 50)
-            update_progress(progress_pct, f'处理块 {i+1}/{num_chunks}...', 'processing')
+            
+            if progress_pct > last_update_pct or i % 5 == 0 or i == num_chunks - 1:
+                update_progress(progress_pct, f'处理块 {i+1}/{num_chunks}...', 'processing')
+                last_update_pct = progress_pct
             
             processed_chunk, silence_count = process_single_cycling_chunk(chunk, sample_rate, noise_reduction,
                                                                           silence_threshold, min_silence_duration,

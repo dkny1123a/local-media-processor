@@ -816,6 +816,7 @@
             border-radius: 3px;
             transition: width 0.1s linear;
             position: relative;
+            pointer-events: none;
         }
 
         .player-progress-fill::after {
@@ -832,6 +833,7 @@
             box-shadow: 0 2px 6px rgba(0,0,0,0.2);
             opacity: 0;
             transition: opacity 0.2s;
+            pointer-events: none;
         }
 
         .player-progress-bar:hover .player-progress-fill::after {
@@ -2033,8 +2035,8 @@
                     throw new Error(submitResult.message);
                 }
                 
-                let pollInterval = 1000;
-                let maxInterval = 5000;
+                let pollInterval = 500;
+                let maxInterval = 2000;
                 
                 const pollProgress = async () => {
                     try {
@@ -2067,15 +2069,17 @@
                         
                         updateProgressUI(progress.percentage, progress.message, progress.status, elapsedStr);
                         
-                        if (progress.percentage > 50) {
-                            pollInterval = Math.min(pollInterval * 1.2, maxInterval);
+                        if (progress.percentage > 80 && progress.percentage < 100) {
+                            pollInterval = Math.min(pollInterval * 1.1, maxInterval);
+                        } else {
+                            pollInterval = 500;
                         }
                         
                         progressInterval = setTimeout(pollProgress, pollInterval);
                         
                     } catch (e) {
                         console.log('获取进度失败:', e);
-                        progressInterval = setTimeout(pollProgress, pollInterval);
+                        progressInterval = setTimeout(pollProgress, Math.min(pollInterval * 2, 3000));
                     }
                 };
                 
@@ -2129,9 +2133,13 @@
         }
         
         function formatDuration(seconds) {
-            const mins = Math.floor(seconds / 60);
-            const secs = seconds % 60;
-            return mins > 0 ? `${mins}分${secs}秒` : `${secs}秒`;
+            const hours = Math.floor(seconds / 3600);
+            const mins = Math.floor((seconds % 3600) / 60);
+            const secs = Math.floor(seconds % 60);
+            if (hours > 0) {
+                return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+            }
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
         }
 
         function showResult(result) {
@@ -2271,6 +2279,14 @@
             
             await loadWaveform(`/app/output/${result.processed_audio_file}`, 'processedWaveform', 'processedDuration');
             
+            await new Promise((resolve) => {
+                if (processedAudio.duration && !isNaN(processedAudio.duration)) {
+                    resolve();
+                } else {
+                    processedAudio.addEventListener('loadedmetadata', resolve);
+                }
+            });
+            
             initAudioPlayer();
         }
 
@@ -2285,11 +2301,9 @@
             const volumeFill = document.getElementById('volumeFill');
             const volumeIcon = document.getElementById('volumeIcon');
             const waveformContainer = document.getElementById('processedWaveform');
-            const waveformProgress = document.getElementById('waveformProgress');
 
             audio.currentTime = 0;
             progressFill.style.width = '0%';
-            if (waveformProgress) waveformProgress.style.width = '0%';
             currentTimeEl.textContent = '0:00';
             playPauseBtn.textContent = '▶';
 
@@ -2304,9 +2318,10 @@
             }
 
             function updateProgress() {
-                if (audio.duration) {
+                if (audio.duration && !isNaN(audio.duration)) {
                     const progress = (audio.currentTime / audio.duration) * 100;
                     progressFill.style.width = `${progress}%`;
+                    const waveformProgress = document.getElementById('waveformProgress');
                     if (waveformProgress) waveformProgress.style.width = `${progress}%`;
                     currentTimeEl.textContent = formatTime(audio.currentTime);
                 }
@@ -2324,7 +2339,9 @@
             }
 
             function audioLoaded() {
-                totalTimeEl.textContent = formatTime(audio.duration);
+                if (audio.duration && !isNaN(audio.duration)) {
+                    totalTimeEl.textContent = formatTime(audio.duration);
+                }
                 updateVolume();
             }
 
@@ -2339,9 +2356,16 @@
             function onEnded() {
                 playPauseBtn.textContent = '▶';
                 progressFill.style.width = '0%';
+                const waveformProgress = document.getElementById('waveformProgress');
                 if (waveformProgress) waveformProgress.style.width = '0%';
                 currentTimeEl.textContent = '0:00';
             }
+
+            audio.removeEventListener('loadedmetadata', audioLoaded);
+            audio.removeEventListener('timeupdate', updateProgress);
+            audio.removeEventListener('play', onPlay);
+            audio.removeEventListener('pause', onPause);
+            audio.removeEventListener('ended', onEnded);
 
             audio.addEventListener('loadedmetadata', audioLoaded);
             audio.addEventListener('timeupdate', updateProgress);
@@ -2350,31 +2374,46 @@
             audio.addEventListener('ended', onEnded);
 
             playPauseBtn.onclick = function(e) {
+                e.preventDefault();
                 e.stopPropagation();
                 if (audio.paused) {
-                    audio.play();
+                    audio.play().catch(function(err) {
+                        console.error('播放失败:', err);
+                    });
                 } else {
                     audio.pause();
                 }
             };
 
             progressBar.onclick = function(e) {
+                e.preventDefault();
                 e.stopPropagation();
                 const rect = progressBar.getBoundingClientRect();
+                if (rect.width === 0) return;
                 const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                audio.currentTime = percent * audio.duration;
+                if (audio.duration && !isNaN(audio.duration)) {
+                    audio.currentTime = percent * audio.duration;
+                    updateProgress();
+                }
             };
 
             waveformContainer.onclick = function(e) {
+                e.preventDefault();
                 e.stopPropagation();
                 const rect = waveformContainer.getBoundingClientRect();
+                if (rect.width === 0) return;
                 const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                audio.currentTime = percent * audio.duration;
+                if (audio.duration && !isNaN(audio.duration)) {
+                    audio.currentTime = percent * audio.duration;
+                    updateProgress();
+                }
             };
 
             volumeSlider.onclick = function(e) {
+                e.preventDefault();
                 e.stopPropagation();
                 const rect = volumeSlider.getBoundingClientRect();
+                if (rect.width === 0) return;
                 const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
                 audio.volume = percent;
                 updateVolume();
