@@ -105,12 +105,16 @@ def extract_audio_from_video(video_path, audio_output_path):
             '-q:a', '0',
             '-map', 'a',
             '-y',
+            '-loglevel', 'error',
             audio_output_path
         ]
-        subprocess.run(command, check=True, capture_output=True)
+        subprocess.run(command, check=True, capture_output=True, timeout=600)
         return True
     except subprocess.CalledProcessError as e:
-        print(f"音频提取失败: {e.stderr.decode()}")
+        print(f"音频提取失败: {e.stderr.decode() if e.stderr else str(e)}")
+        return False
+    except subprocess.TimeoutExpired:
+        print(f"音频提取超时（10分钟）: {video_path}")
         return False
     except Exception as e:
         print(f"音频提取失败: {str(e)}")
@@ -310,9 +314,11 @@ def process_video(
                 ]
                 
                 try:
-                    subprocess.run(command, check=True, capture_output=True)
+                    subprocess.run(command, check=True, capture_output=True, timeout=300)
                     os.unlink(temp_wav_path)
                     temp_wav_path = normalized_path
+                except subprocess.TimeoutExpired:
+                    os.unlink(normalized_path)
                 except:
                     os.unlink(normalized_path)
             
@@ -330,7 +336,7 @@ def process_video(
                     processed_audio_path
                 ]
                 
-                subprocess.run(command, check=True, capture_output=True)
+                subprocess.run(command, check=True, capture_output=True, timeout=600)
                 
                 os.unlink(temp_wav_path)
             else:
@@ -351,7 +357,7 @@ def process_video(
                     processed_audio_path
                 ]
                 
-                subprocess.run(command, check=True, capture_output=True)
+                subprocess.run(command, check=True, capture_output=True, timeout=600)
                 
                 os.unlink(temp_path)
             

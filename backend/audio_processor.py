@@ -27,10 +27,14 @@ def convert_to_wav(input_path):
         ]
         
         try:
-            subprocess.run(command, check=True, capture_output=True)
+            subprocess.run(command, check=True, capture_output=True, timeout=120)
             return temp_path, True
         except subprocess.CalledProcessError as e:
             print(f"格式转换失败: {e.stderr.decode()}")
+            return input_path, False
+        except subprocess.TimeoutExpired:
+            print(f"格式转换超时")
+            os.unlink(temp_path)
             return input_path, False
     
     return input_path, False
@@ -136,8 +140,11 @@ def save_as_mp3(audio_data, sample_rate, output_path):
             output_path
         ]
         
-        subprocess.run(command, check=True, capture_output=True)
+        subprocess.run(command, check=True, capture_output=True, timeout=600)
         return True
+    except subprocess.TimeoutExpired:
+        print(f"保存MP3超时")
+        return False
     except Exception as e:
         print(f"保存MP3失败: {str(e)}")
         return False

@@ -13,12 +13,14 @@ def get_audio_duration(file_path):
         result = subprocess.run(
             ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', 
              '-of', 'csv=p=0', file_path],
-            capture_output=True, text=True, check=True
+            capture_output=True, text=True, check=True, timeout=30
         )
         return float(result.stdout.strip())
+    except subprocess.TimeoutExpired:
+        print(f"ffprobe超时: {file_path}")
     except:
         try:
-            return librosa.get_duration(filename=file_path)
+            return librosa.get_duration(path=file_path)
         except:
             return 0
 
@@ -42,10 +44,13 @@ def load_audio_chunk_ffmpeg(file_path, sample_rate, offset, duration):
     ]
     
     try:
-        subprocess.run(command, check=True, capture_output=True)
+        subprocess.run(command, check=True, capture_output=True, timeout=60)
         chunk, _ = librosa.load(temp_path, sr=sample_rate, mono=True)
         os.unlink(temp_path)
         return chunk
+    except subprocess.TimeoutExpired:
+        os.unlink(temp_path)
+        return None
     except:
         os.unlink(temp_path)
         return None
@@ -68,11 +73,20 @@ def load_audio_chunk(file_path, sample_rate, offset, duration):
 
 
 def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction, 
-                        silence_threshold, min_silence_duration, sample_rate):
+                        silence_threshold, min_silence_duration, sample_rate,
+                        scene='default'):
     from .adaptive_processor import apply_highpass_filter
     
     try:
-        if highpass_cutoff > 0:
+        if scene == 'cycling' or scene == 'cycling_bluetooth':
+            from .cycling_audio_processor import apply_bandpass_filter, apply_voice_enhancement
+            from .cycling_audio_processor import apply_dynamic_range_compression, apply_intelligibility_boost
+            
+            audio_chunk = apply_bandpass_filter(audio_chunk, sample_rate)
+            audio_chunk = apply_voice_enhancement(audio_chunk, sample_rate)
+            audio_chunk = apply_dynamic_range_compression(audio_chunk, sample_rate)
+            audio_chunk = apply_intelligibility_boost(audio_chunk, sample_rate)
+        elif highpass_cutoff > 0:
             audio_chunk = apply_highpass_filter(audio_chunk, sample_rate, highpass_cutoff)
         
         if noise_reduction > 0:
@@ -161,17 +175,17 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
 
 def _chunk_worker(args):
     i, audio_chunk, highpass_cutoff, noise_reduction, silence_threshold, \
-        min_silence_duration, sample_rate, result_path = args
+        min_silence_duration, sample_rate, result_path, scene = args
     
     result = process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
-                                 silence_threshold, min_silence_duration, sample_rate)
+                                  silence_threshold, min_silence_duration, sample_rate, scene)
     np.save(result_path, result)
 
 
 def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction, 
-                               silence_threshold, min_silence_duration, sample_rate, result_path):
+                               silence_threshold, min_silence_duration, sample_rate, result_path, scene='default'):
     args = (i, audio_chunk, highpass_cutoff, noise_reduction, silence_threshold, 
-            min_silence_duration, sample_rate, result_path)
+            min_silence_duration, sample_rate, result_path, scene)
     
     p = mp.Process(target=_chunk_worker, args=(args,))
     p.start()
@@ -232,9 +246,13 @@ def merge_wav_files(wav_files, output_path):
     ]
     
     try:
-        result = subprocess.run(command, check=True, capture_output=True)
+        result = subprocess.run(command, check=True, capture_output=True, timeout=300)
         os.unlink(list_path)
         return True
+    except subprocess.TimeoutExpired:
+        print(f"[Merge] ffmpeg合并超时")
+        os.unlink(list_path)
+        return False
     except subprocess.CalledProcessError as e:
         print(f"[Merge] ffmpeg合并失败: {e}")
         print(f"[Merge] stderr: {e.stderr.decode('utf-8', errors='ignore')}")
@@ -249,11 +267,11 @@ def merge_wav_files(wav_files, output_path):
 
 def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff, 
                          noise_reduction, silence_threshold, min_silence_duration,
-                         progress_callback=None, task_name="audio"):
+                         progress_callback=None, task_name="audio", scene='default'):
     total_duration = get_audio_duration(file_path)
     if total_duration <= 0:
         try:
-            total_duration = librosa.get_duration(filename=file_path)
+            total_duration = librosa.get_duration(path=file_path)
         except:
             total_duration = 0
     
@@ -301,7 +319,7 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
             
             success, result = process_chunk_with_timeout(
                 i, audio_chunk, highpass_cutoff, noise_reduction,
-                silence_threshold, min_silence_duration, sample_rate, result_path
+                silence_threshold, min_silence_duration, sample_rate, result_path, scene
             )
             
             chunk_to_save = result if success else audio_chunk

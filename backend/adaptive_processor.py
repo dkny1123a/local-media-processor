@@ -157,7 +157,7 @@ def calculate_adaptive_parameters(
     highpass_cutoff = 0.0
     stationary_noise = False
     
-    is_cycling_scene = scene in ['cycling', 'bluetooth']
+    is_cycling_scene = scene in ['cycling', 'bluetooth', 'cycling_bluetooth']
     
     if scene == 'cycling':
         base_noise_reduction = 0.85
@@ -171,8 +171,13 @@ def calculate_adaptive_parameters(
         base_silence_threshold = -50.0
         base_min_silence_duration = 0.4
         target_db = -3.0
-        highpass_cutoff = 0.0
-        stationary_noise = noise_level in ['very_noisy', 'noisy']
+    elif scene == 'cycling_bluetooth':
+        base_noise_reduction = 0.90
+        base_silence_threshold = -40.0
+        base_min_silence_duration = 0.2
+        target_db = -3.0
+        highpass_cutoff = 100.0
+        stationary_noise = True
     else:
         base_noise_reduction = 0.30
         base_silence_threshold = -60.0

@@ -24,45 +24,38 @@ def generate_unique_id():
     return str(uuid.uuid4())
 
 def is_temp_file(filename):
-    """判断是否为临时上传文件（带UUID前缀）"""
-    # UUID格式: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-    uuid_pattern = r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}_'
+    """判断是否为临时上传文件（带UUID前缀或task_前缀）"""
     import re
-    return bool(re.match(uuid_pattern, filename))
+    uuid_pattern = r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}_'
+    task_pattern = r'^task_\d+_'
+    return bool(re.match(uuid_pattern, filename)) or bool(re.match(task_pattern, filename))
 
-def cleanup_temp_files(max_age_hours=24):
+def cleanup_temp_files():
     """
-    清理上传目录中的临时文件（带UUID前缀的文件）
+    清理input和output目录中的所有临时文件（带UUID前缀的文件）
     不删除源文件（用户指定的输入文件）和已处理的输出文件
     """
     cleaned_count = 0
     cleaned_size = 0
-    current_time = time.time()
-    max_age_seconds = max_age_hours * 3600
     
-    if not os.path.exists(UPLOAD_DIR):
-        return cleaned_count, cleaned_size
-    
-    for filename in os.listdir(UPLOAD_DIR):
-        file_path = os.path.join(UPLOAD_DIR, filename)
-        
-        # 只清理临时文件（带UUID前缀）
-        if not is_temp_file(filename):
+    for directory in [UPLOAD_DIR, OUTPUT_DIR]:
+        if not os.path.exists(directory):
             continue
         
-        # 检查文件年龄
-        try:
-            file_mtime = os.path.getmtime(file_path)
-            file_age = current_time - file_mtime
+        for filename in os.listdir(directory):
+            file_path = os.path.join(directory, filename)
             
-            if file_age > max_age_seconds:
+            if not is_temp_file(filename):
+                continue
+            
+            try:
                 file_size = os.path.getsize(file_path)
                 os.remove(file_path)
                 cleaned_count += 1
                 cleaned_size += file_size
-                print(f"清理临时文件: {filename} (年龄: {file_age/3600:.1f}小时)")
-        except Exception as e:
-            print(f"清理文件失败 {filename}: {str(e)}")
+                print(f"清理临时文件: {filename}")
+            except Exception as e:
+                print(f"清理文件失败 {filename}: {str(e)}")
     
     return cleaned_count, cleaned_size
 

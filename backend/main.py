@@ -15,8 +15,13 @@ from .utils import cleanup_temp_files, get_file_stats, is_temp_file
 from .denoise_processor import process_denoise
 from .adaptive_processor import process_audio_adaptive, analyze_audio_characteristics, calculate_adaptive_parameters, apply_highpass_filter
 from .audio_chunk_processor import process_audio_chunks, load_audio_chunk, get_audio_duration
+from .cycling_audio_processor import process_cycling_audio
 
 MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024
+
+SUPPORTED_AUDIO_EXTS = ['.mp3', '.wav', '.flac', '.m4a', '.ogg', '.aac', '.amr', '.3gp']
+SUPPORTED_VIDEO_EXTS = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv']
+SUPPORTED_EXTS = SUPPORTED_AUDIO_EXTS + SUPPORTED_VIDEO_EXTS
 
 app = FastAPI(
     title="本地多媒体处理器", 
@@ -44,28 +49,7 @@ OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "/app/output")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-CLEANUP_INTERVAL_HOURS = 24
-CLEANUP_MAX_AGE_HOURS = 24
 
-def run_cleanup_task():
-    while True:
-        try:
-            print(f"[清理任务] 开始清理临时文件...")
-            cleaned_count, cleaned_size = cleanup_temp_files(CLEANUP_MAX_AGE_HOURS)
-            if cleaned_count > 0:
-                print(f"[清理任务] 已清理 {cleaned_count} 个临时文件，释放 {cleaned_size / (1024*1024):.2f} MB")
-            else:
-                print(f"[清理任务] 无需清理")
-        except Exception as e:
-            print(f"[清理任务] 错误: {str(e)}")
-        
-        time.sleep(CLEANUP_INTERVAL_HOURS * 3600)
-
-@app.on_event("startup")
-async def startup_event():
-    cleanup_thread = threading.Thread(target=run_cleanup_task, daemon=True)
-    cleanup_thread.start()
-    print("定时清理任务已启动（每24小时清理超过24小时的临时文件）")
 
 def update_progress(task_id, status, message, percentage=0):
     with progress_lock:
@@ -158,22 +142,24 @@ def convert_to_wav(input_path):
         ]
         
         try:
-            subprocess.run(command, check=True, capture_output=True)
+            subprocess.run(command, check=True, capture_output=True, timeout=120)
             return temp_path, True
         except subprocess.CalledProcessError as e:
             print(f"格式转换失败: {e.stderr.decode()}")
+            return input_path, False
+        except subprocess.TimeoutExpired:
+            print(f"格式转换超时")
+            os.unlink(temp_path)
             return input_path, False
     
     return input_path, False
 
 def detect_file_type(filename):
     ext = os.path.splitext(filename)[1].lower()
-    audio_exts = ['.mp3', '.wav', '.flac', '.m4a', '.ogg', '.aac', '.amr', '.3gp']
-    video_exts = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv']
     
-    if ext in audio_exts:
+    if ext in SUPPORTED_AUDIO_EXTS:
         return 'audio'
-    elif ext in video_exts:
+    elif ext in SUPPORTED_VIDEO_EXTS:
         return 'video'
     else:
         return None
@@ -184,15 +170,19 @@ def get_audio_duration(file_path):
         result = subprocess.run(
             ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', 
              '-of', 'csv=p=0', file_path],
-            capture_output=True, text=True, check=True
+            capture_output=True, text=True, check=True, timeout=30
         )
         return float(result.stdout.strip())
+    except subprocess.TimeoutExpired:
+        print(f"ffprobe超时: {file_path}")
     except:
-        try:
-            import librosa
-            return librosa.get_duration(filename=file_path)
-        except:
-            return 0
+        pass
+    
+    try:
+        import librosa
+        return librosa.get_duration(path=file_path)
+    except:
+        return 0
 
 def load_audio_chunk_ffmpeg(file_path, sample_rate, offset, duration):
     import subprocess
@@ -217,13 +207,16 @@ def load_audio_chunk_ffmpeg(file_path, sample_rate, offset, duration):
     ]
     
     try:
-        subprocess.run(command, check=True, capture_output=True)
+        subprocess.run(command, check=True, capture_output=True, timeout=60)
         
         import librosa
         chunk, _ = librosa.load(temp_path, sr=sample_rate, mono=True)
         
         os.unlink(temp_path)
         return chunk
+    except subprocess.TimeoutExpired:
+        os.unlink(temp_path)
+        return None
     except:
         os.unlink(temp_path)
         return None
@@ -234,7 +227,7 @@ def load_audio_chunks(file_path, sample_rate, chunk_duration=60):
     total_duration = get_audio_duration(file_path)
     if total_duration <= 0:
         import librosa
-        total_duration = librosa.get_duration(filename=file_path)
+        total_duration = librosa.get_duration(path=file_path)
     
     total_samples = int(total_duration * sample_rate)
     num_chunks = (total_samples + chunk_size - 1) // chunk_size
@@ -244,11 +237,15 @@ def load_audio_chunks(file_path, sample_rate, chunk_duration=60):
             offset = i * chunk_duration
             chunk = load_audio_chunk_ffmpeg(file_path, sample_rate, offset, chunk_duration)
             if chunk is None:
-                import librosa
-                chunk = librosa.load(file_path, sr=sample_rate, mono=True, 
-                                    offset=offset, duration=chunk_duration)[0]
-            yield chunk
-            del chunk
+                try:
+                    import librosa
+                    chunk = librosa.load(file_path, sr=sample_rate, mono=True, 
+                                        offset=offset, duration=chunk_duration)[0]
+                except:
+                    chunk = None
+            if chunk is not None:
+                yield chunk
+                del chunk
     
     return chunk_generator, num_chunks, total_samples, sample_rate
 
@@ -337,7 +334,9 @@ def process_audio_background(
         
         converted_path_again, was_converted_again = convert_to_wav(input_path)
         
-        update_progress(task_id, 'processing', '开始分块处理音频...', 25)
+        temp_wav_path = None
+        
+        update_progress(task_id, 'processing', '骑行+蓝牙场景专用处理...', 25)
         
         def progress_callback(msg, pct):
             update_progress(task_id, 'processing', msg, 25 + int(pct * 0.5))
@@ -345,8 +344,81 @@ def process_audio_background(
         processed_audio, stats, temp_wav_path = process_audio_chunks(
             converted_path_again, sample_rate, chunk_duration,
             highpass_cutoff, noise_reduction, silence_threshold, min_silence_duration,
-            progress_callback=progress_callback, task_name=f"Task {task_id}"
+            progress_callback=progress_callback, task_name=f"Task {task_id}", scene='cycling_bluetooth'
         )
+        
+        update_progress(task_id, 'processing', '骑行+蓝牙优化（双重语音增强）...', 75)
+        
+        import numpy as np
+        import soundfile as sf
+        from .cycling_audio_processor import apply_bandpass_filter, apply_voice_enhancement
+        from .cycling_audio_processor import apply_dynamic_range_compression, apply_intelligibility_boost
+        
+        enhanced_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        enhanced_wav.close()
+        enhanced_path = enhanced_wav.name
+        
+        block_size = int(sample_rate * 30)
+        
+        with sf.SoundFile(temp_wav_path, 'r') as f:
+            total_frames = f.frames
+            processed_frames = 0
+            
+            with sf.SoundFile(enhanced_path, 'w', samplerate=f.samplerate, channels=f.channels) as out_f:
+                while processed_frames < total_frames:
+                    remaining = total_frames - processed_frames
+                    read_size = min(block_size, remaining)
+                    
+                    audio_block = f.read(read_size)
+                    
+                    if audio_block.ndim > 1:
+                        audio_block = np.mean(audio_block, axis=1)
+                    
+                    audio_block = apply_bandpass_filter(audio_block, sample_rate)
+                    audio_block = apply_voice_enhancement(audio_block, sample_rate)
+                    audio_block = apply_dynamic_range_compression(audio_block, sample_rate)
+                    audio_block = apply_intelligibility_boost(audio_block, sample_rate)
+                    audio_block = apply_bandpass_filter(audio_block, sample_rate)
+                    audio_block = apply_voice_enhancement(audio_block, sample_rate)
+                    
+                    out_f.write(audio_block)
+                    
+                    del audio_block
+                    gc.collect()
+                    
+                    processed_frames += read_size
+                    progress_pct = 75 + int((processed_frames / total_frames) * 10)
+                    update_progress(task_id, 'processing', f'双重语音增强: {int(processed_frames / total_frames * 100)}%', progress_pct)
+        
+        os.unlink(temp_wav_path)
+        temp_wav_path = enhanced_path
+        
+        update_progress(task_id, 'processing', '蓝牙优化（降采样至16kHz）...', 85)
+        
+        optimized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        optimized_wav.close()
+        optimized_path = optimized_wav.name
+        
+        command = [
+            'ffmpeg',
+            '-i', temp_wav_path,
+            '-ac', '1',
+            '-ar', '16000',
+            '-y',
+            '-loglevel', 'quiet',
+            optimized_path
+        ]
+        
+        try:
+            subprocess.run(command, check=True, capture_output=True, timeout=300)
+            os.unlink(temp_wav_path)
+            temp_wav_path = optimized_path
+            sample_rate = 16000
+        except subprocess.TimeoutExpired:
+            print(f"[Task {task_id}] 降采样超时")
+            os.unlink(optimized_path)
+        except:
+            os.unlink(optimized_path)
         
         if was_converted_again and os.path.exists(converted_path_again):
             os.unlink(converted_path_again)
@@ -367,9 +439,12 @@ def process_audio_background(
             ]
             
             try:
-                subprocess.run(command, check=True, capture_output=True)
+                subprocess.run(command, check=True, capture_output=True, timeout=300)
                 os.unlink(temp_wav_path)
                 temp_wav_path = normalized_path
+            except subprocess.TimeoutExpired:
+                print(f"[Task {task_id}] 音量调整超时")
+                os.unlink(normalized_path)
             except:
                 os.unlink(normalized_path)
         
@@ -422,7 +497,7 @@ def process_audio_background(
                 output_path
             ]
             
-            subprocess.run(command, check=True, capture_output=True)
+            subprocess.run(command, check=True, capture_output=True, timeout=600)
             
             os.unlink(temp_wav_path)
         else:
@@ -444,7 +519,7 @@ def process_audio_background(
                 output_path
             ]
             
-            subprocess.run(command, check=True, capture_output=True)
+            subprocess.run(command, check=True, capture_output=True, timeout=600)
             
             os.unlink(temp_path)
         
@@ -653,6 +728,7 @@ async def process_media_endpoint(
 
 @app.post("/api/audio/waveform")
 async def get_audio_waveform(
+    request: Request,
     file: UploadFile = File(None),
     input_path: str = Form(None)
 ):
@@ -660,7 +736,6 @@ async def get_audio_waveform(
     import soundfile as sf
     from io import BytesIO
     import base64
-    from fastapi import Form
     
     file_id = str(uuid.uuid4())
     
@@ -669,9 +744,20 @@ async def get_audio_waveform(
         with open(temp_path, "wb") as f:
             f.write(await file.read())
         input_path = temp_path
-    else:
-        if input_path and input_path.startswith('/') and not input_path.startswith('/app'):
-            input_path = resolve_host_path(input_path)
+    elif not input_path:
+        try:
+            body = await request.body()
+            params = {}
+            for pair in body.decode().split('&'):
+                if '=' in pair:
+                    key, value = pair.split('=', 1)
+                    params[key] = value
+            input_path = params.get('input_path')
+        except:
+            pass
+    
+    if input_path and input_path.startswith('/') and not input_path.startswith('/app'):
+        input_path = resolve_host_path(input_path)
     
     if not input_path or not os.path.exists(input_path):
         return {"error": f"文件不存在: {input_path}"}
@@ -729,41 +815,6 @@ async def download_file(filename: str):
         '.3gp': 'audio/3gpp'
     }
     
-    async def cleanup_after_download():
-        await asyncio.sleep(5)
-        try:
-            abs_output_dir = os.path.abspath(OUTPUT_DIR)
-            abs_upload_dir = os.path.abspath(UPLOAD_DIR)
-            
-            abs_file_path = os.path.abspath(file_path)
-            if abs_output_dir != os.path.commonpath([abs_output_dir, abs_file_path]):
-                print(f"[清理] 输出文件不在允许目录内，跳过删除: {file_path}")
-                return
-            
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                print(f"[清理] 下载完成后删除输出文件: {decoded_filename}")
-                
-                base_name = os.path.splitext(decoded_filename)[0].replace('_processed', '').replace('_audio', '')
-                if base_name:
-                    for f in os.listdir(UPLOAD_DIR):
-                        if f.endswith(base_name) or base_name in f:
-                            upload_path = os.path.join(UPLOAD_DIR, f)
-                            abs_upload_path = os.path.abspath(upload_path)
-                            
-                            if abs_upload_dir != os.path.commonpath([abs_upload_dir, abs_upload_path]):
-                                print(f"[清理] 上传文件不在允许目录内，跳过删除: {upload_path}")
-                                continue
-                                
-                            if os.path.exists(upload_path):
-                                os.remove(upload_path)
-                                print(f"[清理] 下载完成后删除上传原始文件: {f}")
-                                break
-        except Exception as e:
-            print(f"[清理] 下载后清理文件失败: {e}")
-    
-    asyncio.create_task(cleanup_after_download())
-    
     return FileResponse(file_path, media_type=media_types.get(ext, "application/octet-stream"), filename=decoded_filename)
 
 @app.api_route("/api/audio/preview", methods=["GET", "HEAD"])
@@ -804,9 +855,11 @@ async def list_files():
         full_path = os.path.join(OUTPUT_DIR, f)
         if os.path.isfile(full_path):
             ext = os.path.splitext(f)[1].lower()
+            if ext not in SUPPORTED_EXTS:
+                continue
+            
             duration = 0
-            audio_exts = ['.mp3', '.wav', '.flac', '.m4a', '.ogg', '.aac', '.amr', '.3gp']
-            if ext in audio_exts:
+            if ext in SUPPORTED_AUDIO_EXTS:
                 duration = get_audio_duration(full_path)
             
             files.append({
@@ -838,11 +891,13 @@ async def browse_directory(path: str = "/"):
                     "type": "directory"
                 })
             elif os.path.isfile(full_path):
-                files.append({
-                    "name": entry,
-                    "path": full_path,
-                    "type": "file"
-                })
+                ext = os.path.splitext(entry)[1].lower()
+                if ext in SUPPORTED_EXTS:
+                    files.append({
+                        "name": entry,
+                        "path": full_path,
+                        "type": "file"
+                    })
         
         return {
             "current_path": path,
@@ -875,6 +930,38 @@ async def delete_file_delete(filename: str):
 @app.post("/api/files/delete")
 async def delete_file_post(filename: str = Form(...)):
     return await do_delete_file(filename)
+
+@app.post("/api/files/delete_batch")
+async def delete_files_batch(filenames: str = Form(...)):
+    import urllib.parse
+    filenames_list = filenames.split(',')
+    deleted_count = 0
+    deleted_files = []
+    
+    for filename in filenames_list:
+        filename = filename.strip()
+        if not filename:
+            continue
+        decoded_filename = urllib.parse.unquote(filename)
+        
+        file_path_output = os.path.join(OUTPUT_DIR, decoded_filename)
+        file_path_upload = os.path.join(UPLOAD_DIR, decoded_filename)
+        
+        if os.path.exists(file_path_output):
+            os.remove(file_path_output)
+            deleted_count += 1
+            deleted_files.append(filename)
+        elif os.path.exists(file_path_upload):
+            os.remove(file_path_upload)
+            deleted_count += 1
+            deleted_files.append(filename)
+    
+    return {
+        "success": True,
+        "message": f"已删除 {deleted_count} 个文件",
+        "deleted_count": deleted_count,
+        "deleted_files": deleted_files
+    }
 
 async def do_delete_file(filename: str):
     import urllib.parse
@@ -915,8 +1002,8 @@ async def get_files_stats():
     }
 
 @app.post("/api/files/cleanup")
-async def manual_cleanup(max_age_hours: int = 24):
-    cleaned_count, cleaned_size = cleanup_temp_files(max_age_hours)
+async def manual_cleanup():
+    cleaned_count, cleaned_size = cleanup_temp_files()
     
     return {
         "success": True,
@@ -970,7 +1057,9 @@ async def concatenate_audio(
         ]
         
         try:
-            subprocess.run(command, check=True, capture_output=True)
+            subprocess.run(command, check=True, capture_output=True, timeout=600)
+            os.unlink(list_path)
+        except subprocess.TimeoutExpired:
             os.unlink(list_path)
         except subprocess.CalledProcessError as e:
             os.unlink(list_path)
@@ -991,7 +1080,7 @@ async def concatenate_audio(
                         '-loglevel', 'quiet',
                         temp_wav_path
                     ]
-                    subprocess.run(convert_cmd, check=True, capture_output=True)
+                    subprocess.run(convert_cmd, check=True, capture_output=True, timeout=120)
                     temp_wav_files.append(temp_wav_path)
                 
                 concat_list_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
@@ -1015,7 +1104,7 @@ async def concatenate_audio(
                     '-loglevel', 'quiet',
                     output_path
                 ]
-                subprocess.run(concat_cmd, check=True, capture_output=True)
+                subprocess.run(concat_cmd, check=True, capture_output=True, timeout=600)
                 os.unlink(concat_list_path)
                 
                 for wav_file in temp_wav_files:
@@ -1033,9 +1122,11 @@ async def concatenate_audio(
                 result = subprocess.run(
                     ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', 
                      '-of', 'csv=p=0', file_path],
-                    capture_output=True, text=True, check=True
+                    capture_output=True, text=True, check=True, timeout=30
                 )
                 total_duration += float(result.stdout.strip())
+            except subprocess.TimeoutExpired:
+                pass
             except:
                 pass
         
