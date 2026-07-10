@@ -343,35 +343,16 @@ def process_audio_background(
             update_progress(task_id, 'processing', msg, 25 + int(pct * 0.5))
         
         try:
-            import librosa
-            audio_data, sr = librosa.load(converted_path_again, sr=sample_rate, mono=True)
-            
-            processed_audio, cycling_stats, temp_wav_path = process_cycling_audio(
-                audio_data, sample_rate,
-                noise_reduction=noise_reduction,
-                silence_threshold=silence_threshold,
-                min_silence_duration=min_silence_duration,
-                highpass_cutoff=highpass_cutoff,
-                max_volume=max_volume,
-                target_db=target_db,
-                progress_callback=progress_callback
-            )
-            
-            del audio_data
-            gc.collect()
-            
-            sample_rate = 16000
-        except Exception as e:
-            print(f"[Task {task_id}] 统一处理失败，回退到分块处理: {e}")
-            
-            def fallback_progress_callback(msg, pct):
-                update_progress(task_id, 'processing', msg, 25 + int(pct * 0.5))
-            
-            processed_audio, stats, temp_wav_path = process_audio_chunks(
+            processed_audio, cycling_stats, temp_wav_path = process_audio_chunks(
                 converted_path_again, sample_rate, chunk_duration,
                 highpass_cutoff, noise_reduction, silence_threshold, min_silence_duration,
-                progress_callback=fallback_progress_callback, task_name=f"Task {task_id}", scene='cycling_bluetooth'
+                progress_callback=progress_callback,
+                task_name=f"Task {task_id}",
+                scene='cycling_bluetooth'
             )
+        except Exception as e:
+            print(f"[Task {task_id}] 分块处理失败: {e}")
+            raise
         
         if cycling_stats is None:
             update_progress(task_id, 'processing', '蓝牙优化（降采样至16kHz）...', 85)
@@ -719,9 +700,7 @@ async def get_audio_waveform(
     input_path: str = Form(None)
 ):
     import numpy as np
-    import soundfile as sf
-    from io import BytesIO
-    import base64
+    import subprocess as sp
     
     file_id = str(uuid.uuid4())
     
@@ -749,28 +728,46 @@ async def get_audio_waveform(
         return {"error": f"文件不存在: {input_path}"}
     
     try:
-        data, sr = sf.read(input_path)
+        import librosa
         
-        if len(data.shape) > 1:
-            data = np.mean(data, axis=1)
+        duration = librosa.get_duration(path=input_path)
+        sr = librosa.get_samplerate(input_path)
+        total_samples = int(duration * sr)
         
-        samples_per_bar = max(1, len(data) // 200)
-        waveform_data = []
+        waveform = []
         
-        for i in range(0, len(data), samples_per_bar):
-            segment = data[i:i + samples_per_bar]
-            waveform_data.append(float(np.abs(segment).mean()))
+        if duration > 0:
+            result = sp.run(
+                ['ffmpeg', '-i', input_path, '-f', 's16le', '-acodec', 'pcm_s16le',
+                 '-ac', '1', '-ar', '2000', '-'],
+                capture_output=True, timeout=120
+            )
+            if result.stdout and len(result.stdout) > 0:
+                audio_lowres = np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+                total_lowres_samples = len(audio_lowres)
+                num_points = 200
+                samples_per_point = max(1, total_lowres_samples // num_points)
+                for i in range(num_points):
+                    start = i * samples_per_point
+                    end = min(start + samples_per_point, total_lowres_samples)
+                    if start < total_lowres_samples:
+                        waveform.append(float(np.max(np.abs(audio_lowres[start:end]))))
+                    else:
+                        waveform.append(0.0)
         
-        max_val = max(waveform_data) if waveform_data else 1.0
-        waveform_normalized = [v / max_val for v in waveform_data]
+        if not waveform:
+            waveform = [0.0] * 200
+        
+        max_val = max(waveform) if max(waveform) > 0 else 1.0
+        waveform_normalized = [v / max_val for v in waveform]
         
         return {
             "success": True,
             "waveform": waveform_normalized,
             "sample_rate": sr,
-            "duration": len(data) / sr,
+            "duration": duration,
             "channels": 1,
-            "samples": len(data),
+            "samples": total_samples,
             "filename": os.path.basename(input_path)
         }
     except Exception as e:

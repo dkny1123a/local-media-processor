@@ -2449,11 +2449,14 @@
 
         function renderWaveform(data, elementId) {
             const container = document.getElementById(elementId);
-            const progressBar = container.querySelector('.waveform-progress');
+            
             container.innerHTML = '';
-            if (progressBar) {
-                container.appendChild(progressBar);
-            }
+            
+            const progressBar = document.createElement('div');
+            progressBar.className = 'waveform-progress';
+            progressBar.id = 'waveformProgress';
+            progressBar.style.width = '0%';
+            container.appendChild(progressBar);
             
             data.forEach(value => {
                 const bar = document.createElement('div');

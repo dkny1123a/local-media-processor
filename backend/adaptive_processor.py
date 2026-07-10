@@ -47,20 +47,27 @@ def analyze_audio_characteristics(
     audio_data: np.ndarray,
     sample_rate: int
 ) -> Dict[str, Any]:
-    analysis_duration = 60  # 只分析前60秒
-    analysis_samples = int(sample_rate * analysis_duration)
-    
-    if len(audio_data) > analysis_samples:
-        audio_data = audio_data[:analysis_samples]
-    
-    audio_normalized = audio_data / np.max(np.abs(audio_data)) if np.max(np.abs(audio_data)) > 0 else audio_data
-    
     frame_length = int(sample_rate * 0.02)
     hop_length = int(sample_rate * 0.01)
     
-    rms = librosa.feature.rms(y=audio_normalized, frame_length=frame_length, hop_length=hop_length)[0]
+    total_samples = len(audio_data)
+    analysis_duration = 60
+    analysis_samples = int(sample_rate * analysis_duration)
     
-    if len(rms) == 0:
+    all_rms = []
+    num_segments = min(5, max(1, total_samples // analysis_samples))
+    
+    for i in range(num_segments):
+        offset = int(i * (total_samples - analysis_samples) / max(num_segments - 1, 1)) if num_segments > 1 else 0
+        segment = audio_data[offset:offset + analysis_samples]
+        
+        if len(segment) == 0:
+            continue
+        
+        rms = librosa.feature.rms(y=segment, frame_length=frame_length, hop_length=hop_length)[0]
+        all_rms.extend(rms)
+    
+    if len(all_rms) == 0:
         return {
             'rms_mean': 0.0,
             'rms_median': 0.0,
@@ -76,13 +83,15 @@ def analyze_audio_characteristics(
             'rms_coefficient_of_variation': 0.0
         }
     
-    rms_mean = np.mean(rms)
-    rms_median = np.median(rms)
-    rms_std = np.std(rms)
-    rms_min = np.min(rms)
-    rms_max = np.max(rms)
+    rms_array = np.array(all_rms)
     
-    rms_db = librosa.amplitude_to_db(rms, ref=np.max)
+    rms_mean = np.mean(rms_array)
+    rms_median = np.median(rms_array)
+    rms_std = np.std(rms_array)
+    rms_min = np.min(rms_array)
+    rms_max = np.max(rms_array)
+    
+    rms_db = librosa.amplitude_to_db(rms_array, ref=1.0)
     
     noise_floor_db = np.percentile(rms_db, 5)
     
@@ -161,20 +170,20 @@ def calculate_adaptive_parameters(
     
     if scene == 'cycling':
         base_noise_reduction = 0.85
-        base_silence_threshold = -45.0
+        base_silence_threshold = -50.0
         base_min_silence_duration = 0.3
         target_db = -3.0
         highpass_cutoff = 100.0
         stationary_noise = True
     elif scene == 'bluetooth':
         base_noise_reduction = 0.70
-        base_silence_threshold = -50.0
+        base_silence_threshold = -52.0
         base_min_silence_duration = 0.4
         target_db = -3.0
     elif scene == 'cycling_bluetooth':
         base_noise_reduction = 0.90
-        base_silence_threshold = -40.0
-        base_min_silence_duration = 0.2
+        base_silence_threshold = -50.0
+        base_min_silence_duration = 0.3
         target_db = -3.0
         highpass_cutoff = 100.0
         stationary_noise = True
@@ -188,19 +197,19 @@ def calculate_adaptive_parameters(
     
     if noise_level == 'very_noisy':
         base_noise_reduction = min(0.95, base_noise_reduction * 1.3)
-        base_silence_threshold = max(base_silence_threshold, noise_floor_db + 8)
+        base_silence_threshold = max(base_silence_threshold, min(noise_floor_db + 8, -40.0))
         base_min_silence_duration = min(base_min_silence_duration, 0.3)
     elif noise_level == 'noisy':
         base_noise_reduction = min(0.90, base_noise_reduction * 1.2)
-        base_silence_threshold = max(base_silence_threshold, noise_floor_db + 5)
+        base_silence_threshold = max(base_silence_threshold, min(noise_floor_db + 6, -45.0))
         base_min_silence_duration = min(base_min_silence_duration, 0.35)
     elif noise_level == 'moderate':
         base_noise_reduction = base_noise_reduction * 1.1
-        base_silence_threshold = max(base_silence_threshold, noise_floor_db + 3)
+        base_silence_threshold = max(base_silence_threshold, min(noise_floor_db + 4, -48.0))
     else:
         if is_cycling_scene:
             base_noise_reduction = max(0.50, base_noise_reduction * 0.7)
-            base_silence_threshold = min(base_silence_threshold, -55.0)
+            base_silence_threshold = max(base_silence_threshold, -52.0)
         else:
             base_noise_reduction = max(0.10, base_noise_reduction * 0.5)
     
@@ -211,7 +220,8 @@ def calculate_adaptive_parameters(
         base_noise_reduction = max(0.05, base_noise_reduction * 0.3)
     
     if is_cycling_scene:
-        base_silence_threshold = min(base_silence_threshold, -52.0)
+        base_silence_threshold = min(base_silence_threshold, noise_floor_db + 8)
+        base_silence_threshold = max(base_silence_threshold, noise_floor_db + 2)
         base_min_silence_duration = min(base_min_silence_duration, 0.35)
         base_noise_reduction = max(base_noise_reduction, 0.55)
     

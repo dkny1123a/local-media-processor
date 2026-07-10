@@ -111,6 +111,7 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
         db = librosa.amplitude_to_db(rms, ref=1.0)
         
         silence_mask = db < silence_threshold
+        silence_ratio = float(np.mean(silence_mask))
         
         silence_segments = []
         in_silence = False
@@ -136,6 +137,9 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                                        len(audio_chunk) / sample_rate))
         
         silence_count = len(silence_segments)
+        
+        if silence_count > 0 or silence_ratio > 0.1:
+            print(f"[Silence] dB范围: [{np.min(db):.1f}, {np.max(db):.1f}], 阈值={silence_threshold}, 静音比例={silence_ratio*100:.1f}%, 检测到{silence_count}个静音段")
         
         if silence_segments:
             segments_to_keep = []
@@ -180,9 +184,10 @@ def _chunk_worker(args):
     i, audio_chunk, highpass_cutoff, noise_reduction, silence_threshold, \
         min_silence_duration, sample_rate, result_path, scene = args
     
-    result, _ = process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
+    result, silence_count = process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                                      silence_threshold, min_silence_duration, sample_rate, scene)
     np.save(result_path, result)
+    np.save(result_path + '_silence', np.int64(silence_count))
 
 
 def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction, 
@@ -314,8 +319,8 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
                 continue
             
             if progress_callback:
-                progress_callback(f'正在处理块 {i+1}/{num_chunks}...', 
-                                int((i / num_chunks) * 100))
+                progress_callback(int((i / num_chunks) * 100), 
+                                f'正在处理块 {i+1}/{num_chunks}...')
             
             result_file = tempfile.NamedTemporaryFile(suffix='.npy', delete=False)
             result_file.close()
@@ -329,26 +334,17 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
             chunk_to_save = result if success else audio_chunk
             
             if success:
-                frame_length = int(sample_rate * 0.02)
-                hop_length = int(sample_rate * 0.01)
-                rms = librosa.feature.rms(y=chunk_to_save, frame_length=frame_length, hop_length=hop_length)
-                db = librosa.amplitude_to_db(rms, ref=1.0)
-                silence_mask = db < silence_threshold
-                silence_segments = []
-                in_silence = False
-                start_frame = 0
-                for j, is_silent in enumerate(silence_mask[0]):
-                    if is_silent and not in_silence:
-                        in_silence = True
-                        start_frame = j
-                    elif not is_silent and in_silence:
-                        in_silence = False
-                        end_frame = j
-                        duration = (end_frame - start_frame) * hop_length / sample_rate
-                        if duration >= min_silence_duration:
-                            silence_segments.append((start_frame * hop_length / sample_rate, 
-                                                   end_frame * hop_length / sample_rate))
-                stats["silence_segments_removed"] += len(silence_segments)
+                stats["processed_chunks"] += 1
+                if os.path.exists(result_path + '_silence'):
+                    try:
+                        silence_count = np.load(result_path + '_silence')
+                        stats["silence_segments_removed"] += int(silence_count)
+                        os.unlink(result_path + '_silence')
+                    except:
+                        pass
+            else:
+                stats["timeout_chunks"] += 1
+                print(f"[{task_name}] 块 {i+1} 超时或失败，保留原始音频")
             
             temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
             temp_wav.close()
@@ -356,12 +352,6 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
             
             write_single_chunk_to_wav(chunk_to_save, sample_rate, temp_wav_path)
             current_batch.append(temp_wav_path)
-            
-            if success:
-                stats["processed_chunks"] += 1
-            else:
-                stats["timeout_chunks"] += 1
-                print(f"[{task_name}] 块 {i+1} 超时或失败，保留原始音频")
             
             del audio_chunk, result, chunk_to_save
             gc.collect()
