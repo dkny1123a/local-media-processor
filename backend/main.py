@@ -348,7 +348,8 @@ def process_audio_background(
                 highpass_cutoff, noise_reduction, silence_threshold, min_silence_duration,
                 progress_callback=progress_callback,
                 task_name=f"Task {task_id}",
-                scene='cycling_bluetooth'
+                scene='cycling_bluetooth',
+                adaptive_chunk=True
             )
         except Exception as e:
             print(f"[Task {task_id}] 分块处理失败: {e}")

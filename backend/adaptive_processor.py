@@ -55,7 +55,8 @@ def analyze_audio_characteristics(
     analysis_samples = int(sample_rate * analysis_duration)
     
     all_rms = []
-    num_segments = min(5, max(1, total_samples // analysis_samples))
+    all_db = []
+    num_segments = min(10, max(1, total_samples // analysis_samples))
     
     for i in range(num_segments):
         offset = int(i * (total_samples - analysis_samples) / max(num_segments - 1, 1)) if num_segments > 1 else 0
@@ -75,12 +76,15 @@ def analyze_audio_characteristics(
             'rms_min': 0.0,
             'rms_max': 0.0,
             'noise_floor_db': -80.0,
+            'signal_peak_db': -80.0,
             'signal_to_noise_ratio': 0.0,
-            'is_noisy': False,
-            'noise_level': 'quiet',
             'dynamic_range': 0.0,
-            'noisy_frame_ratio': 0.0,
-            'rms_coefficient_of_variation': 0.0
+            'rms_coefficient_of_variation': 0.0,
+            'silence_ratio_50db': 0.0,
+            'silence_ratio_45db': 0.0,
+            'silence_ratio_40db': 0.0,
+            'avg_quiet_frame_db': 0.0,
+            'avg_loud_frame_db': 0.0
         }
     
     rms_array = np.array(all_rms)
@@ -93,45 +97,23 @@ def analyze_audio_characteristics(
     
     rms_db = librosa.amplitude_to_db(rms_array, ref=1.0)
     
-    noise_floor_db = np.percentile(rms_db, 5)
+    noise_floor_db = np.percentile(rms_db, 3)
+    signal_peak_db = np.percentile(rms_db, 97)
     
-    dynamic_range = np.max(rms_db) - np.min(rms_db) if len(rms_db) > 0 else 0.0
+    dynamic_range = signal_peak_db - noise_floor_db
     
     rms_coefficient_of_variation = rms_std / rms_mean if rms_mean > 0 else 0.0
     
-    signal_rms_db = np.percentile(rms_db, 95)
+    snr_raw = signal_peak_db - noise_floor_db
     
-    if noise_floor_db != -np.inf and signal_rms_db != -np.inf:
-        snr_raw = signal_rms_db - noise_floor_db
-    else:
-        snr_raw = np.inf
+    quiet_frames = rms_db[rms_db < np.percentile(rms_db, 20)]
+    loud_frames = rms_db[rms_db > np.percentile(rms_db, 80)]
+    avg_quiet_frame_db = np.mean(quiet_frames) if len(quiet_frames) > 0 else noise_floor_db
+    avg_loud_frame_db = np.mean(loud_frames) if len(loud_frames) > 0 else signal_peak_db
     
-    if rms_coefficient_of_variation < 0.03 and dynamic_range < 5:
-        snr_estimated = 40.0
-    elif rms_coefficient_of_variation < 0.1 and dynamic_range < 15:
-        snr_estimated = 30.0
-    else:
-        snr_estimated = snr_raw
-    
-    signal_to_noise_ratio = snr_estimated
-    
-    noise_level = 'quiet'
-    is_noisy = False
-    
-    if snr_estimated < 10:
-        noise_level = 'very_noisy'
-        is_noisy = True
-    elif snr_estimated < 20:
-        noise_level = 'noisy'
-        is_noisy = True
-    elif snr_estimated < 30:
-        noise_level = 'moderate'
-        is_noisy = False
-    else:
-        noise_level = 'quiet'
-        is_noisy = False
-    
-    noisy_frame_ratio = np.sum(rms_db > (noise_floor_db + 15)) / len(rms_db)
+    silence_ratio_50db = float(np.mean(rms_db < -50))
+    silence_ratio_45db = float(np.mean(rms_db < -45))
+    silence_ratio_40db = float(np.mean(rms_db < -40))
     
     return {
         'rms_mean': float(rms_mean),
@@ -140,95 +122,88 @@ def analyze_audio_characteristics(
         'rms_min': float(rms_min),
         'rms_max': float(rms_max),
         'noise_floor_db': float(noise_floor_db),
-        'signal_to_noise_ratio': float(signal_to_noise_ratio),
-        'is_noisy': is_noisy,
-        'noise_level': noise_level,
+        'signal_peak_db': float(signal_peak_db),
+        'signal_to_noise_ratio': float(snr_raw),
         'dynamic_range': float(dynamic_range),
-        'noisy_frame_ratio': float(noisy_frame_ratio),
-        'rms_coefficient_of_variation': float(rms_coefficient_of_variation)
+        'rms_coefficient_of_variation': float(rms_coefficient_of_variation),
+        'silence_ratio_50db': silence_ratio_50db,
+        'silence_ratio_45db': silence_ratio_45db,
+        'silence_ratio_40db': silence_ratio_40db,
+        'avg_quiet_frame_db': float(avg_quiet_frame_db),
+        'avg_loud_frame_db': float(avg_loud_frame_db)
     }
 
 
 def calculate_adaptive_parameters(
     analysis: Dict[str, Any],
-    scene: str = 'bluetooth'
+    scene: str = None
 ) -> Dict[str, float]:
-    noise_level = analysis['noise_level']
     noise_floor_db = analysis['noise_floor_db']
+    signal_peak_db = analysis['signal_peak_db']
     signal_to_noise_ratio = analysis['signal_to_noise_ratio']
     dynamic_range = analysis['dynamic_range']
     rms_coefficient_of_variation = analysis['rms_coefficient_of_variation']
+    silence_ratio_50db = analysis['silence_ratio_50db']
+    silence_ratio_45db = analysis['silence_ratio_45db']
+    silence_ratio_40db = analysis['silence_ratio_40db']
+    avg_quiet_frame_db = analysis['avg_quiet_frame_db']
+    avg_loud_frame_db = analysis['avg_loud_frame_db']
     
-    base_noise_reduction = 0.50
-    base_silence_threshold = -55.0
-    base_min_silence_duration = 0.4
-    target_db = -1.0
-    highpass_cutoff = 0.0
-    stationary_noise = False
-    
-    is_cycling_scene = scene in ['cycling', 'bluetooth', 'cycling_bluetooth']
-    
-    if scene == 'cycling':
-        base_noise_reduction = 0.85
-        base_silence_threshold = -50.0
-        base_min_silence_duration = 0.3
-        target_db = -3.0
-        highpass_cutoff = 100.0
-        stationary_noise = True
-    elif scene == 'bluetooth':
-        base_noise_reduction = 0.70
-        base_silence_threshold = -52.0
-        base_min_silence_duration = 0.4
-        target_db = -3.0
-    elif scene == 'cycling_bluetooth':
-        base_noise_reduction = 0.90
-        base_silence_threshold = -50.0
-        base_min_silence_duration = 0.3
-        target_db = -3.0
-        highpass_cutoff = 100.0
-        stationary_noise = True
+    if dynamic_range < 5:
+        silence_threshold_db = noise_floor_db + 3
+    elif dynamic_range < 15:
+        silence_threshold_db = noise_floor_db + (signal_peak_db - noise_floor_db) * 0.25
+    elif dynamic_range < 25:
+        silence_threshold_db = noise_floor_db + (signal_peak_db - noise_floor_db) * 0.30
     else:
-        base_noise_reduction = 0.30
-        base_silence_threshold = -60.0
-        base_min_silence_duration = 0.5
-        target_db = -1.0
-        highpass_cutoff = 0.0
-        stationary_noise = False
+        silence_threshold_db = noise_floor_db + (signal_peak_db - noise_floor_db) * 0.35
     
-    if noise_level == 'very_noisy':
-        base_noise_reduction = min(0.95, base_noise_reduction * 1.3)
-        base_silence_threshold = max(base_silence_threshold, min(noise_floor_db + 8, -40.0))
-        base_min_silence_duration = min(base_min_silence_duration, 0.3)
-    elif noise_level == 'noisy':
-        base_noise_reduction = min(0.90, base_noise_reduction * 1.2)
-        base_silence_threshold = max(base_silence_threshold, min(noise_floor_db + 6, -45.0))
-        base_min_silence_duration = min(base_min_silence_duration, 0.35)
-    elif noise_level == 'moderate':
-        base_noise_reduction = base_noise_reduction * 1.1
-        base_silence_threshold = max(base_silence_threshold, min(noise_floor_db + 4, -48.0))
+    silence_threshold_db = max(silence_threshold_db, noise_floor_db + 2)
+    silence_threshold_db = min(silence_threshold_db, signal_peak_db - 5)
+    
+    if signal_to_noise_ratio < 5:
+        noise_reduction = 0.95
+    elif signal_to_noise_ratio < 10:
+        noise_reduction = 0.85 + (signal_to_noise_ratio - 5) * (-0.02)
+    elif signal_to_noise_ratio < 20:
+        noise_reduction = 0.70 + (signal_to_noise_ratio - 10) * (-0.015)
+    elif signal_to_noise_ratio < 30:
+        noise_reduction = 0.50 + (signal_to_noise_ratio - 20) * (-0.01)
+    elif signal_to_noise_ratio < 40:
+        noise_reduction = 0.35 + (signal_to_noise_ratio - 30) * (-0.0075)
     else:
-        if is_cycling_scene:
-            base_noise_reduction = max(0.50, base_noise_reduction * 0.7)
-            base_silence_threshold = max(base_silence_threshold, -52.0)
-        else:
-            base_noise_reduction = max(0.10, base_noise_reduction * 0.5)
+        noise_reduction = 0.15
     
-    if signal_to_noise_ratio < 10 and signal_to_noise_ratio != -np.inf:
-        base_noise_reduction = min(0.98, base_noise_reduction * 1.4)
+    noise_reduction = max(0.05, min(0.98, noise_reduction))
     
     if rms_coefficient_of_variation < 0.03 and dynamic_range < 5:
-        base_noise_reduction = max(0.05, base_noise_reduction * 0.3)
+        noise_reduction = max(0.05, noise_reduction * 0.3)
     
-    if is_cycling_scene:
-        base_silence_threshold = min(base_silence_threshold, noise_floor_db + 8)
-        base_silence_threshold = max(base_silence_threshold, noise_floor_db + 2)
-        base_min_silence_duration = min(base_min_silence_duration, 0.35)
-        base_noise_reduction = max(base_noise_reduction, 0.55)
+    if silence_ratio_50db > 0.8:
+        min_silence_duration = 0.25
+    elif silence_ratio_50db > 0.6:
+        min_silence_duration = 0.30
+    elif silence_ratio_45db > 0.5:
+        min_silence_duration = 0.35
+    elif silence_ratio_40db > 0.4:
+        min_silence_duration = 0.40
+    else:
+        min_silence_duration = 0.50
+    
+    if dynamic_range < 10:
+        min_silence_duration = max(min_silence_duration, 0.4)
+    
+    target_db = -3.0
+    
+    has_low_freq_noise = noise_floor_db > -65
+    highpass_cutoff = 100.0 if has_low_freq_noise else 0.0
+    
+    stationary_noise = signal_to_noise_ratio < 25 and rms_coefficient_of_variation < 0.2
     
     return {
-        'noise_reduction': round(base_noise_reduction, 2),
-        'silence_threshold': round(base_silence_threshold, 1),
-        'min_silence_duration': round(base_min_silence_duration, 2),
+        'noise_reduction': round(noise_reduction, 2),
+        'silence_threshold': round(silence_threshold_db, 1),
+        'min_silence_duration': round(min_silence_duration, 2),
         'target_db': round(target_db, 1),
         'stationary_noise': stationary_noise,
         'highpass_cutoff': round(highpass_cutoff, 0)
@@ -245,7 +220,7 @@ def process_audio_adaptive(
     max_volume: bool = True,
     target_db: float = -1.0,
     stationary_noise: bool = False,
-    scene: str = 'bluetooth',
+    scene: str = None,
     progress_callback=None
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     def update_progress(pct, msg, status=None):
@@ -259,7 +234,7 @@ def process_audio_adaptive(
         
         if auto_detect:
             print(f"[Audio] 步骤2: 计算自适应参数")
-            adaptive_params = calculate_adaptive_parameters(analysis, scene)
+            adaptive_params = calculate_adaptive_parameters(analysis)
             noise_reduction = adaptive_params['noise_reduction']
             silence_threshold = adaptive_params['silence_threshold']
             min_silence_duration = adaptive_params['min_silence_duration']
@@ -267,7 +242,7 @@ def process_audio_adaptive(
             highpass_cutoff = adaptive_params['highpass_cutoff']
             print(f"[Audio] 参数: nr={noise_reduction}, hp={highpass_cutoff}, st={silence_threshold}")
         else:
-            highpass_cutoff = 100.0 if scene == 'cycling' else 0.0
+            highpass_cutoff = 100.0
         
         if highpass_cutoff > 0:
             print(f"[Audio] 步骤3: 应用高通滤波 ({highpass_cutoff}Hz)")
