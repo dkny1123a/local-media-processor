@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir --upgrade "pip>=21.0,<26.0" "setuptools>=65.0,<70
 
 RUN pip install --no-cache-dir -r requirements.txt
 
+RUN python3 -c "from silero_vad import load_silero_vad; load_silero_vad(onnx=True)" 2>/dev/null || \
+    python3 -c "from silero_vad import load_silero_vad; load_silero_vad()" 2>/dev/null || true
+
 
 FROM docker.m.daocloud.io/library/python:3.10-slim AS runner
 
@@ -27,6 +30,7 @@ RUN apt-get update && apt-get install -y \
 
 COPY --from=builder /usr/local/lib/python3.10/site-packages/ /usr/local/lib/python3.10/site-packages/
 COPY --from=builder /usr/local/bin/ /usr/local/bin/
+COPY --from=builder /root/.cache/ /root/.cache/
 
 COPY backend/ /app/backend/
 COPY frontend/ /app/frontend/

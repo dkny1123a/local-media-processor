@@ -72,10 +72,57 @@ def load_audio_chunk(file_path, sample_rate, offset, duration):
     return chunk
 
 
+def detect_non_voice_segments(audio_data, sample_rate, min_duration=0.5, flatness_threshold=0.25):
+    try:
+        n_fft = int(sample_rate * 0.02)
+        hop_length = int(sample_rate * 0.01)
+        
+        spectral_flatness = librosa.feature.spectral_flatness(y=audio_data, 
+                                                              n_fft=n_fft, 
+                                                              hop_length=hop_length)[0]
+        
+        non_voice_mask = spectral_flatness > flatness_threshold
+        non_voice_ratio = float(np.mean(non_voice_mask))
+        
+        non_voice_segments = []
+        in_non_voice = False
+        start_frame = 0
+        
+        for j, is_non_voice in enumerate(non_voice_mask):
+            if is_non_voice and not in_non_voice:
+                in_non_voice = True
+                start_frame = j
+            elif not is_non_voice and in_non_voice:
+                in_non_voice = False
+                end_frame = j
+                duration = (end_frame - start_frame) * hop_length / sample_rate
+                if duration >= min_duration:
+                    non_voice_segments.append((start_frame * hop_length / sample_rate, 
+                                              end_frame * hop_length / sample_rate))
+        
+        if in_non_voice:
+            end_frame = len(non_voice_mask)
+            duration = (end_frame - start_frame) * hop_length / sample_rate
+            if duration >= min_duration:
+                non_voice_segments.append((start_frame * hop_length / sample_rate, 
+                                          len(audio_data) / sample_rate))
+        
+        non_voice_count = len(non_voice_segments)
+        if non_voice_count > 0 or non_voice_ratio > 0.05:
+            print(f"[Non-Voice] 平坦度范围: [{np.min(spectral_flatness):.3f}, {np.max(spectral_flatness):.3f}], "
+                  f"阈值={flatness_threshold}, 无人声比例={non_voice_ratio*100:.1f}%, 检测到{non_voice_count}个无人声段")
+        
+        return non_voice_segments
+    except Exception as e:
+        print(f"无人声检测失败: {e}")
+        return []
+
+
 def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction, 
                         silence_threshold, min_silence_duration, sample_rate,
                         scene='default', adaptive_chunk=False):
     silence_count = 0
+    non_voice_count = 0
     from .adaptive_processor import apply_highpass_filter
     
     try:
@@ -191,20 +238,57 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                 
                 audio_chunk = np.concatenate(result_segments)
         
-        return audio_chunk, silence_count
+        if scene == 'cycling' or scene == 'cycling_bluetooth':
+            from .vad import detect_non_voice_segments_vad
+            
+            non_voice_segments = detect_non_voice_segments_vad(audio_chunk, sample_rate, 
+                                                               min_duration=max(chunk_min_silence_duration, 0.5))
+            non_voice_count = len(non_voice_segments)
+            
+            if non_voice_count > 0:
+                print(f"[VAD] 检测到{non_voice_count}个无人声段")
+                
+                voice_segments_to_keep = []
+                last_end = 0
+                
+                for start, end in sorted(non_voice_segments):
+                    if start > last_end:
+                        voice_segments_to_keep.append((last_end, start))
+                    last_end = end
+                
+                if last_end < len(audio_chunk) / sample_rate:
+                    voice_segments_to_keep.append((last_end, len(audio_chunk) / sample_rate))
+                
+                if voice_segments_to_keep:
+                    result_segments = []
+                    for start, end in voice_segments_to_keep:
+                        start_sample = int(start * sample_rate)
+                        end_sample = int(end * sample_rate)
+                        
+                        segment = audio_chunk[start_sample:end_sample]
+                        
+                        if len(segment) > soft_boundary_samples * 2:
+                            segment[:soft_boundary_samples] = segment[:soft_boundary_samples] * fade_in
+                            segment[-soft_boundary_samples:] = segment[-soft_boundary_samples:] * fade_out
+                        
+                        result_segments.append(segment)
+                    
+                    audio_chunk = np.concatenate(result_segments)
+        
+        return audio_chunk, silence_count, non_voice_count
     except Exception:
-        return audio_chunk, 0
+        return audio_chunk, 0, 0
 
 
 def _chunk_worker(args):
     i, audio_chunk, highpass_cutoff, noise_reduction, silence_threshold, \
         min_silence_duration, sample_rate, result_path, scene, adaptive_chunk = args
     
-    result, silence_count = process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
+    result, silence_count, non_voice_count = process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                                      silence_threshold, min_silence_duration, sample_rate, scene, adaptive_chunk)
     np.save(result_path, result)
     with open(result_path + '_silence', 'w') as f:
-        f.write(str(silence_count))
+        f.write(f"{silence_count},{non_voice_count}")
 
 
 def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction, 
@@ -220,14 +304,19 @@ def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction,
     if p.is_alive():
         p.terminate()
         p.join()
-        return False, audio_chunk, 0
+        return False, audio_chunk, 0, 0
     
     silence_count = 0
+    non_voice_count = 0
     silence_path = result_path + '_silence'
     if os.path.exists(silence_path):
         try:
             with open(silence_path, 'r') as f:
-                silence_count = int(f.read())
+                content = f.read().strip()
+                if ',' in content:
+                    silence_count, non_voice_count = map(int, content.split(','))
+                else:
+                    silence_count = int(content)
             os.unlink(silence_path)
         except:
             pass
@@ -236,12 +325,12 @@ def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction,
         try:
             result = np.load(result_path)
             os.unlink(result_path)
-            return True, result, silence_count
+            return True, result, silence_count, non_voice_count
         except:
             os.unlink(result_path)
-            return False, audio_chunk, 0
+            return False, audio_chunk, 0, 0
     
-    return False, audio_chunk, 0
+    return False, audio_chunk, 0, 0
 
 
 def write_single_chunk_to_wav(chunk, sample_rate, output_path):
@@ -328,7 +417,8 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
         "total_time": 0,
         "chunk_times": [],
         "temp_files_created": 0,
-        "silence_segments_removed": 0
+        "silence_segments_removed": 0,
+        "non_voice_segments_removed": 0
     }
     
     start_time = time.time()
@@ -355,7 +445,7 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
             result_file.close()
             result_path = result_file.name
             
-            success, result, silence_count = process_chunk_with_timeout(
+            success, result, silence_count, non_voice_count = process_chunk_with_timeout(
                 i, audio_chunk, highpass_cutoff, noise_reduction,
                 silence_threshold, min_silence_duration, sample_rate, result_path, scene,
                 adaptive_chunk
@@ -366,7 +456,9 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
             if success:
                 stats["processed_chunks"] += 1
                 stats["silence_segments_removed"] += silence_count
-                print(f"[{task_name}] 块 {i+1} 静音段数: {silence_count}, 累计: {stats['silence_segments_removed']}")
+                stats["non_voice_segments_removed"] += non_voice_count
+                print(f"[{task_name}] 块 {i+1} 静音段数: {silence_count}, 无人声段数: {non_voice_count}, "
+                      f"累计静音: {stats['silence_segments_removed']}, 累计无人声: {stats['non_voice_segments_removed']}")
             else:
                 stats["timeout_chunks"] += 1
                 print(f"[{task_name}] 块 {i+1} 超时或失败，保留原始音频")
@@ -448,5 +540,6 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
           f"平均每块={avg_time:.2f}s, 最长={max_time:.2f}s")
     
     print(f"[{task_name}] 静音段统计: 累计移除={stats['silence_segments_removed']}")
+    print(f"[{task_name}] 无人声段统计: 累计移除={stats['non_voice_segments_removed']}")
     
     return processed_audio, stats, temp_wav_path

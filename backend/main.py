@@ -16,6 +16,7 @@ from .denoise_processor import process_denoise
 from .adaptive_processor import process_audio_adaptive, analyze_audio_characteristics, calculate_adaptive_parameters, apply_highpass_filter
 from .audio_chunk_processor import process_audio_chunks, load_audio_chunk, get_audio_duration
 from .cycling_audio_processor import process_cycling_audio
+from .vad import init_vad
 
 MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024
 
@@ -81,6 +82,10 @@ def clear_task_result(task_id):
     with task_results_lock:
         if task_id in task_results:
             del task_results[task_id]
+
+@app.on_event("startup")
+async def startup_event():
+    init_vad()
 
 @app.get("/api/media/progress/{task_id}")
 async def get_progress_endpoint(task_id: str):
@@ -413,6 +418,7 @@ def process_audio_background(
                 os.unlink(normalized_path)
         
         silence_segments_removed = cycling_stats.get('silence_segments_removed', 0) if cycling_stats else 0
+        non_voice_segments_removed = cycling_stats.get('non_voice_segments_removed', 0) if cycling_stats else 0
         
         adaptive_result = {
             'success': True,
@@ -430,7 +436,8 @@ def process_audio_background(
             'stats': {
                 'duration': round(len(processed_audio) / sample_rate, 2) if len(processed_audio) > 0 else 0,
                 'sample_rate': sample_rate,
-                'silence_segments_removed': silence_segments_removed
+                'silence_segments_removed': silence_segments_removed,
+                'non_voice_segments_removed': non_voice_segments_removed
             }
         }
         
