@@ -196,7 +196,7 @@ def calculate_adaptive_parameters(
     target_db = -3.0
     
     has_low_freq_noise = noise_floor_db > -65
-    highpass_cutoff = 100.0 if has_low_freq_noise else 0.0
+    highpass_cutoff = 150.0 if has_low_freq_noise else 0.0
     
     stationary_noise = signal_to_noise_ratio < 25 and rms_coefficient_of_variation < 0.2
     
@@ -274,7 +274,8 @@ def process_audio_adaptive(
                             reduced_chunk = nr.reduce_noise(
                                 y=chunk,
                                 sr=sample_rate,
-                                prop_decrease=noise_reduction
+                                prop_decrease=noise_reduction,
+                                stationary=False
                             )
                         except Exception as e:
                             print(f"[Audio] 降噪块 {i} 失败: {str(e)}")

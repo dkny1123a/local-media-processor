@@ -38,7 +38,7 @@ def apply_dynamic_range_compression(audio_data: np.ndarray, sample_rate: int, ra
         return audio_data
 
 
-def apply_bandpass_filter(audio_data: np.ndarray, sample_rate: int, low_cut: float = 300.0, high_cut: float = 3400.0) -> np.ndarray:
+def apply_bandpass_filter(audio_data: np.ndarray, sample_rate: int, low_cut: float = 80.0, high_cut: float = 8000.0) -> np.ndarray:
     try:
         import soundfile as sf
         
@@ -122,11 +122,13 @@ def apply_voice_enhancement(audio_data: np.ndarray, sample_rate: int) -> np.ndar
         voice_mask = np.zeros_like(magnitude)
         for i, freq in enumerate(freq_bins):
             if 300 <= freq <= 3400:
-                voice_mask[i] = 1.0
-            elif 200 <= freq < 300:
-                voice_mask[i] = 0.5
-            elif 3400 < freq <= 4000:
-                voice_mask[i] = 0.3
+                voice_mask[i] = 1.2
+            elif 4000 <= freq <= 8000:
+                voice_mask[i] = 0.4
+            elif 80 <= freq < 300:
+                voice_mask[i] = 0.6
+            elif 3400 < freq < 4000:
+                voice_mask[i] = 0.8
         
         enhanced_magnitude = magnitude * (1 + voice_mask * 0.5)
         
@@ -182,29 +184,53 @@ def apply_intelligibility_boost(audio_data: np.ndarray, sample_rate: int) -> np.
     try:
         audio_normalized = audio_data / np.max(np.abs(audio_data)) if np.max(np.abs(audio_data)) > 0 else audio_data
         
-        alpha = 1.2
-        beta = 0.8
-        
         frame_length = int(sample_rate * 0.02)
         hop_length = int(sample_rate * 0.01)
+        
+        stft = librosa.stft(audio_normalized, n_fft=512, hop_length=hop_length)
+        magnitude, phase = librosa.magphase(stft)
+        
+        freq_bins = librosa.fft_frequencies(sr=sample_rate, n_fft=512)
         
         rms = librosa.feature.rms(y=audio_normalized, frame_length=frame_length, hop_length=hop_length)[0]
         db = librosa.amplitude_to_db(rms, ref=1.0)
         
-        boost_factor = np.ones_like(audio_normalized)
+        enhanced_magnitude = magnitude.copy()
         
-        for i in range(len(db)):
-            start = i * hop_length
-            end = min(start + frame_length, len(audio_normalized))
-            if db[i] < -30:
-                boost_factor[start:end] = alpha
-            elif db[i] < -15:
-                boost_factor[start:end] = beta
+        for i, freq in enumerate(freq_bins):
+            for j in range(magnitude.shape[1]):
+                if 300 <= freq <= 3400:
+                    if db[j] < -35:
+                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.5
+                    elif db[j] < -25:
+                        boost_db = min(10, (-25 - db[j]) * 2)
+                        enhanced_magnitude[i, j] = magnitude[i, j] * (10 ** (boost_db / 20))
+                    elif db[j] < -10:
+                        boost_db = (-10 - db[j]) * 0.5
+                        enhanced_magnitude[i, j] = magnitude[i, j] * (10 ** (boost_db / 20))
+                elif 80 <= freq < 300 or 3400 < freq <= 8000:
+                    if db[j] < -35:
+                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.3
+                    elif db[j] < -25:
+                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.7
+                else:
+                    if db[j] < -30:
+                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.3
         
-        boosted_audio = audio_normalized * boost_factor
-        boosted_audio = boosted_audio / np.max(np.abs(boosted_audio)) if np.max(np.abs(boosted_audio)) > 0 else boosted_audio
+        enhanced_stft = enhanced_magnitude * phase
+        enhanced_audio = librosa.istft(enhanced_stft, hop_length=hop_length)
         
-        return boosted_audio
+        if len(enhanced_audio) > len(audio_normalized):
+            enhanced_audio = enhanced_audio[:len(audio_normalized)]
+        elif len(enhanced_audio) < len(audio_normalized):
+            padding = np.zeros(len(audio_normalized) - len(enhanced_audio))
+            enhanced_audio = np.concatenate([enhanced_audio, padding])
+        
+        max_val = np.max(np.abs(enhanced_audio))
+        if max_val > 0.95:
+            enhanced_audio = enhanced_audio * 0.95 / max_val
+        
+        return enhanced_audio
     except Exception as e:
         print(f"清晰度增强失败: {e}")
         return audio_data
@@ -225,27 +251,79 @@ def apply_bluetooth_optimization(audio_data: np.ndarray, sample_rate: int) -> np
         return audio_data, sample_rate
 
 
+def apply_vad_gate(audio_data: np.ndarray, sample_rate: int, voice_gain_db: float = 8.0, noise_attenuation_db: float = -6.0) -> np.ndarray:
+    try:
+        from .vad import detect_voice_segments
+        
+        voice_segments = detect_voice_segments(audio_data, sample_rate, 
+                                               min_speech_duration=0.2,
+                                               min_silence_duration=0.3)
+        
+        if not voice_segments:
+            return audio_data
+        
+        voice_gain = 10 ** (voice_gain_db / 20)
+        noise_gain = 10 ** (noise_attenuation_db / 20)
+        
+        gated_audio = audio_data.copy() * noise_gain
+        
+        for start, end in voice_segments:
+            start_sample = int(start * sample_rate)
+            end_sample = int(end * sample_rate)
+            
+            segment_length = end_sample - start_sample
+            fade_samples = min(int(sample_rate * 0.05), segment_length // 4)
+            
+            voice_segment = audio_data[start_sample:end_sample]
+            
+            if segment_length > fade_samples * 2:
+                fade_in = np.linspace(noise_gain, voice_gain, fade_samples)
+                fade_out = np.linspace(voice_gain, noise_gain, fade_samples)
+                
+                voice_segment[:fade_samples] = audio_data[start_sample:start_sample + fade_samples] * fade_in
+                voice_segment[-fade_samples:] = audio_data[end_sample - fade_samples:end_sample] * fade_out
+                voice_segment[fade_samples:-fade_samples] = audio_data[start_sample + fade_samples:end_sample - fade_samples] * voice_gain
+            else:
+                voice_segment = audio_data[start_sample:end_sample] * voice_gain
+            
+            gated_audio[start_sample:end_sample] = voice_segment
+        
+        max_val = np.max(np.abs(gated_audio))
+        if max_val > 0.95:
+            gated_audio = gated_audio * 0.95 / max_val
+        
+        return gated_audio
+    except Exception as e:
+        print(f"VAD门控失败: {e}")
+        return audio_data
+
+
 def process_single_cycling_chunk(audio_chunk, sample_rate, noise_reduction, 
                                  silence_threshold, min_silence_duration, 
                                  highpass_cutoff):
     silence_count = 0
     try:
-        audio_chunk = apply_bandpass_filter(audio_chunk, sample_rate)
-        audio_chunk = apply_voice_enhancement(audio_chunk, sample_rate)
-        audio_chunk = apply_dynamic_range_compression(audio_chunk, sample_rate)
-        audio_chunk = apply_intelligibility_boost(audio_chunk, sample_rate)
-        
         if noise_reduction > 0:
             try:
                 import noisereduce as nr
                 reduced_chunk = nr.reduce_noise(
                     y=audio_chunk,
                     sr=sample_rate,
-                    prop_decrease=noise_reduction
+                    prop_decrease=noise_reduction,
+                    stationary=False
                 )
                 audio_chunk = audio_chunk * (1 - noise_reduction) + reduced_chunk * noise_reduction
-            except Exception:
-                pass
+                print(f"[Cycling] 降噪完成 (stationary=False, prop_decrease={noise_reduction})")
+            except Exception as e:
+                print(f"[Cycling] 降噪失败: {e}")
+        
+        audio_chunk = apply_bandpass_filter(audio_chunk, sample_rate)
+        audio_chunk = apply_voice_enhancement(audio_chunk, sample_rate)
+        audio_chunk = apply_dynamic_range_compression(audio_chunk, sample_rate)
+        audio_chunk = apply_intelligibility_boost(audio_chunk, sample_rate)
+        
+        audio_chunk = apply_vad_gate(audio_chunk, sample_rate, voice_gain_db=8.0, noise_attenuation_db=-6.0)
+        print("[Cycling] VAD门控完成")
         
         voice_segments = detect_voice_activity(audio_chunk, sample_rate, silence_threshold, min_silence_duration)
         

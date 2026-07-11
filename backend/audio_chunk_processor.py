@@ -148,7 +148,8 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                 reduced_chunk = nr.reduce_noise(
                     y=audio_chunk,
                     sr=sample_rate,
-                    prop_decrease=chunk_noise_reduction
+                    prop_decrease=chunk_noise_reduction,
+                    stationary=False
                 )
                 audio_chunk = audio_chunk * (1 - chunk_noise_reduction) + reduced_chunk * chunk_noise_reduction
                 del reduced_chunk
@@ -159,11 +160,13 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
         if scene == 'cycling' or scene == 'cycling_bluetooth':
             from .cycling_audio_processor import apply_bandpass_filter, apply_voice_enhancement
             from .cycling_audio_processor import apply_dynamic_range_compression, apply_intelligibility_boost
+            from .cycling_audio_processor import apply_vad_gate
             
             audio_chunk = apply_bandpass_filter(audio_chunk, sample_rate)
             audio_chunk = apply_voice_enhancement(audio_chunk, sample_rate)
             audio_chunk = apply_dynamic_range_compression(audio_chunk, sample_rate)
             audio_chunk = apply_intelligibility_boost(audio_chunk, sample_rate)
+            audio_chunk = apply_vad_gate(audio_chunk, sample_rate, voice_gain_db=8.0, noise_attenuation_db=-6.0)
         elif chunk_highpass_cutoff > 0:
             audio_chunk = apply_highpass_filter(audio_chunk, sample_rate, chunk_highpass_cutoff)
         
