@@ -166,7 +166,60 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
             audio_chunk = apply_voice_enhancement(audio_chunk, sample_rate)
             audio_chunk = apply_dynamic_range_compression(audio_chunk, sample_rate)
             audio_chunk = apply_intelligibility_boost(audio_chunk, sample_rate)
-            audio_chunk = apply_vad_gate(audio_chunk, sample_rate, voice_gain_db=8.0, noise_attenuation_db=-6.0)
+            audio_chunk, voice_segments = apply_vad_gate(audio_chunk, sample_rate, voice_gain_db=8.0, noise_attenuation_db=-6.0)
+            
+            total_duration = len(audio_chunk) / sample_rate
+            non_voice_segments = []
+            last_end = 0.0
+            if voice_segments:
+                for start, end in sorted(voice_segments):
+                    if start > last_end + 0.01:
+                        non_voice_duration = start - last_end
+                        if non_voice_duration >= max(chunk_min_silence_duration, 0.5):
+                            non_voice_segments.append((last_end, start))
+                    last_end = end
+                
+                if last_end < total_duration - 0.01:
+                    non_voice_duration = total_duration - last_end
+                    if non_voice_duration >= max(chunk_min_silence_duration, 0.5):
+                        non_voice_segments.append((last_end, total_duration))
+            
+            non_voice_count = len(non_voice_segments)
+            
+            if non_voice_count > 0:
+                print(f"[VAD] 检测到{non_voice_count}个无人声段")
+                
+                soft_boundary_ms = 50
+                soft_boundary_samples = int(sample_rate * soft_boundary_ms / 1000)
+                fade_in = np.linspace(0, 1, soft_boundary_samples)
+                fade_out = np.linspace(1, 0, soft_boundary_samples)
+                
+                voice_segments_to_keep = []
+                last_end = 0
+                
+                for start, end in sorted(non_voice_segments):
+                    if start > last_end:
+                        voice_segments_to_keep.append((last_end, start))
+                    last_end = end
+                
+                if last_end < len(audio_chunk) / sample_rate:
+                    voice_segments_to_keep.append((last_end, len(audio_chunk) / sample_rate))
+                
+                if voice_segments_to_keep:
+                    result_segments = []
+                    for start, end in voice_segments_to_keep:
+                        start_sample = int(start * sample_rate)
+                        end_sample = int(end * sample_rate)
+                        
+                        segment = audio_chunk[start_sample:end_sample]
+                        
+                        if len(segment) > soft_boundary_samples * 2:
+                            segment[:soft_boundary_samples] = segment[:soft_boundary_samples] * fade_in
+                            segment[-soft_boundary_samples:] = segment[-soft_boundary_samples:] * fade_out
+                        
+                        result_segments.append(segment)
+                    
+                    audio_chunk = np.concatenate(result_segments)
         elif chunk_highpass_cutoff > 0:
             audio_chunk = apply_highpass_filter(audio_chunk, sample_rate, chunk_highpass_cutoff)
         
@@ -240,43 +293,6 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                     result_segments.append(segment)
                 
                 audio_chunk = np.concatenate(result_segments)
-        
-        if scene == 'cycling' or scene == 'cycling_bluetooth':
-            from .vad import detect_non_voice_segments_vad
-            
-            non_voice_segments = detect_non_voice_segments_vad(audio_chunk, sample_rate, 
-                                                               min_duration=max(chunk_min_silence_duration, 0.5))
-            non_voice_count = len(non_voice_segments)
-            
-            if non_voice_count > 0:
-                print(f"[VAD] 检测到{non_voice_count}个无人声段")
-                
-                voice_segments_to_keep = []
-                last_end = 0
-                
-                for start, end in sorted(non_voice_segments):
-                    if start > last_end:
-                        voice_segments_to_keep.append((last_end, start))
-                    last_end = end
-                
-                if last_end < len(audio_chunk) / sample_rate:
-                    voice_segments_to_keep.append((last_end, len(audio_chunk) / sample_rate))
-                
-                if voice_segments_to_keep:
-                    result_segments = []
-                    for start, end in voice_segments_to_keep:
-                        start_sample = int(start * sample_rate)
-                        end_sample = int(end * sample_rate)
-                        
-                        segment = audio_chunk[start_sample:end_sample]
-                        
-                        if len(segment) > soft_boundary_samples * 2:
-                            segment[:soft_boundary_samples] = segment[:soft_boundary_samples] * fade_in
-                            segment[-soft_boundary_samples:] = segment[-soft_boundary_samples:] * fade_out
-                        
-                        result_segments.append(segment)
-                    
-                    audio_chunk = np.concatenate(result_segments)
         
         return audio_chunk, silence_count, non_voice_count
     except Exception:

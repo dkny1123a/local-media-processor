@@ -251,7 +251,7 @@ def apply_bluetooth_optimization(audio_data: np.ndarray, sample_rate: int) -> np
         return audio_data, sample_rate
 
 
-def apply_vad_gate(audio_data: np.ndarray, sample_rate: int, voice_gain_db: float = 8.0, noise_attenuation_db: float = -6.0) -> np.ndarray:
+def apply_vad_gate(audio_data: np.ndarray, sample_rate: int, voice_gain_db: float = 8.0, noise_attenuation_db: float = -6.0) -> tuple:
     try:
         from .vad import detect_voice_segments
         
@@ -260,7 +260,7 @@ def apply_vad_gate(audio_data: np.ndarray, sample_rate: int, voice_gain_db: floa
                                                min_silence_duration=0.3)
         
         if not voice_segments:
-            return audio_data
+            return audio_data, []
         
         voice_gain = 10 ** (voice_gain_db / 20)
         noise_gain = 10 ** (noise_attenuation_db / 20)
@@ -292,10 +292,10 @@ def apply_vad_gate(audio_data: np.ndarray, sample_rate: int, voice_gain_db: floa
         if max_val > 0.95:
             gated_audio = gated_audio * 0.95 / max_val
         
-        return gated_audio
+        return gated_audio, voice_segments
     except Exception as e:
         print(f"VAD门控失败: {e}")
-        return audio_data
+        return audio_data, []
 
 
 def process_single_cycling_chunk(audio_chunk, sample_rate, noise_reduction, 
