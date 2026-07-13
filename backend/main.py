@@ -656,7 +656,8 @@ async def process_media_endpoint(
                         "stats": {
                             "original_duration": round(original_duration, 2),
                             "processed_duration": round(processed_duration, 2),
-                            "silence_segments_removed": 0,
+                            "silence_segments_removed": result.get("processed_info", {}).get("stats", {}).get("silence_segments_removed", 0),
+                            "non_voice_segments_removed": result.get("processed_info", {}).get("stats", {}).get("non_voice_segments_removed", 0),
                             "duration_reduction_percent": round(duration_reduction, 2),
                             "noise_reduction": result.get("applied_params", {}).get("noise_reduction", noise_reduction),
                             "sample_rate": processed_info.get("sample_rate", 44100)
