@@ -14,15 +14,18 @@ from .video_processor import process_video, extract_audio_from_video, get_audio_
 from .utils import cleanup_temp_files, get_file_stats, is_temp_file
 from .denoise_processor import process_denoise
 from .adaptive_processor import process_audio_adaptive, analyze_audio_characteristics, calculate_adaptive_parameters, apply_highpass_filter
-from .audio_chunk_processor import process_audio_chunks, load_audio_chunk, get_audio_duration
+from .audio_chunk_processor import process_audio_chunks, get_audio_duration
 from .cycling_audio_processor import process_cycling_audio
 from .vad import init_vad
+from .core import (
+    SUPPORTED_AUDIO_EXTS,
+    SUPPORTED_VIDEO_EXTS,
+    SUPPORTED_EXTS,
+    convert_to_wav,
+    load_audio_chunk,
+)
 
 MAX_FILE_SIZE = 4 * 1024 * 1024 * 1024
-
-SUPPORTED_AUDIO_EXTS = ['.mp3', '.wav', '.flac', '.m4a', '.ogg', '.aac', '.amr', '.3gp']
-SUPPORTED_VIDEO_EXTS = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv']
-SUPPORTED_EXTS = SUPPORTED_AUDIO_EXTS + SUPPORTED_VIDEO_EXTS
 
 app = FastAPI(
     title="本地多媒体处理器", 
@@ -123,45 +126,9 @@ def get_output_path(output_path, original_filename, suffix="processed"):
     else:
         return output_path
 
-def convert_to_wav(input_path):
-    import subprocess
-    import tempfile
-    
-    ext = os.path.splitext(input_path)[1].lower()
-    
-    amr_formats = ['.amr', '.3gp']
-    m4a_formats = ['.m4a']
-    
-    if ext in amr_formats or ext in m4a_formats:
-        temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-        temp_path = temp_wav.name
-        temp_wav.close()
-        
-        command = [
-            'ffmpeg',
-            '-i', input_path,
-            '-ac', '1',
-            '-ar', '44100',
-            '-y',
-            temp_path
-        ]
-        
-        try:
-            subprocess.run(command, check=True, capture_output=True, timeout=120)
-            return temp_path, True
-        except subprocess.CalledProcessError as e:
-            print(f"格式转换失败: {e.stderr.decode()}")
-            return input_path, False
-        except subprocess.TimeoutExpired:
-            print(f"格式转换超时")
-            os.unlink(temp_path)
-            return input_path, False
-    
-    return input_path, False
-
 def detect_file_type(filename):
     ext = os.path.splitext(filename)[1].lower()
-    
+
     if ext in SUPPORTED_AUDIO_EXTS:
         return 'audio'
     elif ext in SUPPORTED_VIDEO_EXTS:
@@ -169,89 +136,25 @@ def detect_file_type(filename):
     else:
         return None
 
-def get_audio_duration(file_path):
-    import subprocess
-    try:
-        result = subprocess.run(
-            ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', 
-             '-of', 'csv=p=0', file_path],
-            capture_output=True, text=True, check=True, timeout=30
-        )
-        return float(result.stdout.strip())
-    except subprocess.TimeoutExpired:
-        print(f"ffprobe超时: {file_path}")
-    except:
-        pass
-    
-    try:
-        import librosa
-        return librosa.get_duration(path=file_path)
-    except:
-        return 0
-
-def load_audio_chunk_ffmpeg(file_path, sample_rate, offset, duration):
-    import subprocess
-    import numpy as np
-    import tempfile
-    
-    temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-    temp_path = temp_wav.name
-    temp_wav.close()
-    
-    command = [
-        'ffmpeg',
-        '-ss', str(offset),
-        '-i', file_path,
-        '-t', str(duration),
-        '-ac', '1',
-        '-ar', str(sample_rate),
-        '-f', 'wav',
-        '-y',
-        '-loglevel', 'quiet',
-        temp_path
-    ]
-    
-    try:
-        subprocess.run(command, check=True, capture_output=True, timeout=60)
-        
-        import librosa
-        chunk, _ = librosa.load(temp_path, sr=sample_rate, mono=True)
-        
-        os.unlink(temp_path)
-        return chunk
-    except subprocess.TimeoutExpired:
-        os.unlink(temp_path)
-        return None
-    except:
-        os.unlink(temp_path)
-        return None
 
 def load_audio_chunks(file_path, sample_rate, chunk_duration=60):
-    chunk_size = int(sample_rate * chunk_duration)
-    
     total_duration = get_audio_duration(file_path)
     if total_duration <= 0:
         import librosa
         total_duration = librosa.get_duration(path=file_path)
-    
+
     total_samples = int(total_duration * sample_rate)
+    chunk_size = int(sample_rate * chunk_duration)
     num_chunks = (total_samples + chunk_size - 1) // chunk_size
-    
+
     def chunk_generator():
         for i in range(num_chunks):
             offset = i * chunk_duration
-            chunk = load_audio_chunk_ffmpeg(file_path, sample_rate, offset, chunk_duration)
-            if chunk is None:
-                try:
-                    import librosa
-                    chunk = librosa.load(file_path, sr=sample_rate, mono=True, 
-                                        offset=offset, duration=chunk_duration)[0]
-                except:
-                    chunk = None
+            chunk = load_audio_chunk(file_path, sample_rate, offset, chunk_duration)
             if chunk is not None:
                 yield chunk
                 del chunk
-    
+
     return chunk_generator, num_chunks, total_samples, sample_rate
 
 

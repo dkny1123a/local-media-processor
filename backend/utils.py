@@ -3,17 +3,17 @@ import os
 import time
 from datetime import datetime
 
+from .core import SUPPORTED_AUDIO_EXTS, SUPPORTED_VIDEO_EXTS
+
 UPLOAD_DIR = os.environ.get('UPLOAD_DIR', '/app/uploads')
 OUTPUT_DIR = os.environ.get('OUTPUT_DIR', '/app/output')
 
 def validate_file_type(filename, allowed_types):
     ext = os.path.splitext(filename)[1].lower()
-    audio_extensions = ['.mp3', '.wav', '.flac', '.m4a', '.ogg', '.aac', '.amr', '.3gp']
-    video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv']
     
-    if 'audio' in allowed_types and ext in audio_extensions:
+    if 'audio' in allowed_types and ext in SUPPORTED_AUDIO_EXTS:
         return True
-    if 'video' in allowed_types and ext in video_extensions:
+    if 'video' in allowed_types and ext in SUPPORTED_VIDEO_EXTS:
         return True
     return False
 

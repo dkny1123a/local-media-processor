@@ -7,69 +7,12 @@ import multiprocessing as mp
 import time
 import gc
 
-
-def get_audio_duration(file_path):
-    try:
-        result = subprocess.run(
-            ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', 
-             '-of', 'csv=p=0', file_path],
-            capture_output=True, text=True, check=True, timeout=30
-        )
-        return float(result.stdout.strip())
-    except subprocess.TimeoutExpired:
-        print(f"ffprobe超时: {file_path}")
-    except:
-        try:
-            return librosa.get_duration(path=file_path)
-        except:
-            return 0
-
-
-def load_audio_chunk_ffmpeg(file_path, sample_rate, offset, duration):
-    temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-    temp_path = temp_wav.name
-    temp_wav.close()
-    
-    command = [
-        'ffmpeg',
-        '-ss', str(offset),
-        '-i', file_path,
-        '-t', str(duration),
-        '-ac', '1',
-        '-ar', str(sample_rate),
-        '-f', 'wav',
-        '-y',
-        '-loglevel', 'quiet',
-        temp_path
-    ]
-    
-    try:
-        subprocess.run(command, check=True, capture_output=True, timeout=60)
-        chunk, _ = librosa.load(temp_path, sr=sample_rate, mono=True)
-        os.unlink(temp_path)
-        return chunk
-    except subprocess.TimeoutExpired:
-        os.unlink(temp_path)
-        return None
-    except:
-        os.unlink(temp_path)
-        return None
-
-
-def load_audio_chunk_fallback(file_path, sample_rate, offset, duration):
-    try:
-        chunk = librosa.load(file_path, sr=sample_rate, mono=True, 
-                            offset=offset, duration=duration)[0]
-        return chunk
-    except:
-        return None
-
-
-def load_audio_chunk(file_path, sample_rate, offset, duration):
-    chunk = load_audio_chunk_ffmpeg(file_path, sample_rate, offset, duration)
-    if chunk is None:
-        chunk = load_audio_chunk_fallback(file_path, sample_rate, offset, duration)
-    return chunk
+from .core import (
+    detect_silence,
+    get_audio_duration,
+    load_audio_chunk,
+    remove_silence,
+)
 
 
 def detect_non_voice_segments(audio_data, sample_rate, min_duration=0.5, flatness_threshold=0.25):
@@ -222,78 +165,30 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                     audio_chunk = np.concatenate(result_segments)
         elif chunk_highpass_cutoff > 0:
             audio_chunk = apply_highpass_filter(audio_chunk, sample_rate, chunk_highpass_cutoff)
-        
-        frame_length = int(sample_rate * 0.02)
-        hop_length = int(sample_rate * 0.01)
-        
-        rms = librosa.feature.rms(y=audio_chunk, frame_length=frame_length, hop_length=hop_length)
-        db = librosa.amplitude_to_db(rms, ref=1.0)
-        
-        silence_mask = db < chunk_silence_threshold
-        silence_ratio = float(np.mean(silence_mask))
-        
-        silence_segments = []
-        in_silence = False
-        start_frame = 0
-        
-        for j, is_silent in enumerate(silence_mask[0]):
-            if is_silent and not in_silence:
-                in_silence = True
-                start_frame = j
-            elif not is_silent and in_silence:
-                in_silence = False
-                end_frame = j
-                duration = (end_frame - start_frame) * hop_length / sample_rate
-                if duration >= chunk_min_silence_duration:
-                    silence_segments.append((start_frame * hop_length / sample_rate, 
-                                           end_frame * hop_length / sample_rate))
-        
-        if in_silence:
-            end_frame = len(silence_mask[0])
-            duration = (end_frame - start_frame) * hop_length / sample_rate
-            if duration >= chunk_min_silence_duration:
-                silence_segments.append((start_frame * hop_length / sample_rate, 
-                                       len(audio_chunk) / sample_rate))
-        
+
+        silence_segments = detect_silence(
+            audio_chunk,
+            sample_rate,
+            threshold_dbfs=chunk_silence_threshold,
+            min_silence_duration=chunk_min_silence_duration,
+        )
+
         silence_count = len(silence_segments)
-        
-        if silence_count > 0 or silence_ratio > 0.1:
-            print(f"[Silence] dB范围: [{np.min(db):.1f}, {np.max(db):.1f}], 阈值={chunk_silence_threshold}, 静音比例={silence_ratio*100:.1f}%, 检测到{silence_count}个静音段")
-        
+
+        db = None
+        if silence_count > 0:
+            import librosa
+            frame_length = int(sample_rate * 0.02)
+            hop_length = int(sample_rate * 0.01)
+            rms = librosa.feature.rms(y=audio_chunk, frame_length=frame_length, hop_length=hop_length)
+            db = librosa.amplitude_to_db(rms, ref=1.0)
+            silence_ratio = float(np.mean(db < chunk_silence_threshold))
+            if silence_ratio > 0.1:
+                print(f"[Silence] dB范围: [{np.min(db):.1f}, {np.max(db):.1f}], 阈值={chunk_silence_threshold}, 静音比例={silence_ratio*100:.1f}%, 检测到{silence_count}个静音段")
+
         if silence_segments:
-            segments_to_keep = []
-            last_end = 0
-            
-            soft_boundary_ms = 50
-            soft_boundary_samples = int(sample_rate * soft_boundary_ms / 1000)
-            
-            for start, end in sorted(silence_segments):
-                if start > last_end:
-                    segments_to_keep.append((last_end, start))
-                last_end = end
-            
-            if last_end < len(audio_chunk) / sample_rate:
-                segments_to_keep.append((last_end, len(audio_chunk) / sample_rate))
-            
-            if segments_to_keep:
-                result_segments = []
-                for start, end in segments_to_keep:
-                    start_sample = int(start * sample_rate)
-                    end_sample = int(end * sample_rate)
-                    
-                    segment = audio_chunk[start_sample:end_sample]
-                    
-                    if len(segment) > soft_boundary_samples * 2:
-                        fade_in = np.linspace(0, 1, soft_boundary_samples)
-                        fade_out = np.linspace(1, 0, soft_boundary_samples)
-                        
-                        segment[:soft_boundary_samples] = segment[:soft_boundary_samples] * fade_in
-                        segment[-soft_boundary_samples:] = segment[-soft_boundary_samples:] * fade_out
-                    
-                    result_segments.append(segment)
-                
-                audio_chunk = np.concatenate(result_segments)
-        
+            audio_chunk = remove_silence(audio_chunk, sample_rate, silence_segments)
+
         return audio_chunk, silence_count, non_voice_count
     except Exception:
         return audio_chunk, 0, 0

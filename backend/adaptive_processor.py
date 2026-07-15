@@ -2,6 +2,8 @@ import numpy as np
 import librosa
 from typing import Dict, Any, Tuple
 
+from .core import detect_silence_chunked, remove_silence
+
 
 def apply_highpass_filter(
     audio_data: np.ndarray,
@@ -315,127 +317,18 @@ def process_audio_adaptive(
         
         print(f"[Audio] 步骤5: 静音检测")
         update_progress(0.65, '正在检测静音片段...', 'processing')
-        
-        frame_length = int(sample_rate * 0.02)
-        hop_length = int(sample_rate * 0.01)
-        
-        detection_chunk_duration = 300
-        detection_chunk_size = int(sample_rate * detection_chunk_duration)
-        total_samples = len(audio_data)
-        
-        audio_normalized = audio_data / np.max(np.abs(audio_data)) if np.max(np.abs(audio_data)) > 0 else audio_data
-        
-        if total_samples > detection_chunk_size:
-            silence_segments = []
-            total_chunks = (total_samples + detection_chunk_size - 1) // detection_chunk_size
-            
-            for i, start in enumerate(range(0, total_samples, detection_chunk_size)):
-                chunk = audio_normalized[start:start + detection_chunk_size]
-                
-                rms = librosa.feature.rms(y=chunk, frame_length=frame_length, hop_length=hop_length)
-                db = librosa.amplitude_to_db(rms, ref=np.max)
-                
-                chunk_silence_mask = db < silence_threshold
-                
-                chunk_segments = []
-                in_silence = False
-                start_frame = 0
-                
-                for j, is_silent in enumerate(chunk_silence_mask[0]):
-                    if is_silent and not in_silence:
-                        in_silence = True
-                        start_frame = j
-                    elif not is_silent and in_silence:
-                        in_silence = False
-                        end_frame = j
-                        duration = (end_frame - start_frame) * hop_length / sample_rate
-                        if duration >= min_silence_duration:
-                            start_time = (start + start_frame * hop_length) / sample_rate
-                            end_time = (start + end_frame * hop_length) / sample_rate
-                            chunk_segments.append((start_time, end_time))
-                
-                if in_silence:
-                    end_frame = len(chunk_silence_mask[0])
-                    duration = (end_frame - start_frame) * hop_length / sample_rate
-                    if duration >= min_silence_duration:
-                        start_time = (start + start_frame * hop_length) / sample_rate
-                        end_time = (start + end_frame * hop_length) / sample_rate
-                        chunk_segments.append((start_time, end_time))
-                
-                silence_segments.extend(chunk_segments)
-                del chunk, rms, db, chunk_silence_mask, chunk_segments
-                
-                chunk_pct = (i + 1) / total_chunks
-                update_progress(0.65 + chunk_pct * 0.1, f'正在检测静音: {int(chunk_pct * 100)}%', 'processing')
-            
-            import gc
-            gc.collect()
-        else:
-            rms = librosa.feature.rms(y=audio_normalized, frame_length=frame_length, hop_length=hop_length)
-            db = librosa.amplitude_to_db(rms, ref=np.max)
-            
-            silence_mask = db < silence_threshold
-            
-            silence_segments = []
-            in_silence = False
-            start_frame = 0
-            
-            for i, is_silent in enumerate(silence_mask[0]):
-                if is_silent and not in_silence:
-                    in_silence = True
-                    start_frame = i
-                elif not is_silent and in_silence:
-                    in_silence = False
-                    end_frame = i
-                    duration = (end_frame - start_frame) * hop_length / sample_rate
-                    if duration >= min_silence_duration:
-                        start_time = start_frame * hop_length / sample_rate
-                        end_time = end_frame * hop_length / sample_rate
-                        silence_segments.append((start_time, end_time))
-            
-            if in_silence:
-                end_frame = len(silence_mask[0])
-                duration = (end_frame - start_frame) * hop_length / sample_rate
-                if duration >= min_silence_duration:
-                    start_time = start_frame * hop_length / sample_rate
-                    end_time = len(audio_data) / sample_rate
-                    silence_segments.append((start_time, end_time))
-        
+
+        silence_segments = detect_silence_chunked(
+            audio_data,
+            sample_rate,
+            threshold_dbfs=silence_threshold,
+            min_silence_duration=min_silence_duration,
+            chunk_duration=300,
+        )
+
         if silence_segments:
             update_progress(0.75, '正在移除静音片段（保留50ms软边界）...', 'processing')
-            
-            segments_to_keep = []
-            last_end = 0
-            
-            soft_boundary_ms = 50
-            soft_boundary_samples = int(sample_rate * soft_boundary_ms / 1000)
-            
-            for start, end in sorted(silence_segments):
-                if start > last_end:
-                    segments_to_keep.append((last_end, start))
-                last_end = end
-            
-            if last_end < len(audio_data) / sample_rate:
-                segments_to_keep.append((last_end, len(audio_data) / sample_rate))
-            
-            if segments_to_keep:
-                result_segments = []
-                for idx, (start, end) in enumerate(segments_to_keep):
-                    start_sample = int(start * sample_rate)
-                    end_sample = int(end * sample_rate)
-                    
-                    segment = audio_data[start_sample:end_sample]
-                    
-                    if len(segment) > soft_boundary_samples * 2:
-                        fade_in = np.linspace(0, 1, soft_boundary_samples)
-                        fade_out = np.linspace(1, 0, soft_boundary_samples)
-                        
-                        segment[:soft_boundary_samples] = segment[:soft_boundary_samples] * fade_in
-                        segment[-soft_boundary_samples:] = segment[-soft_boundary_samples:] * fade_out
-                    
-                    result_segments.append(segment)
-                
-                audio_data = np.concatenate(result_segments)
+            audio_data = remove_silence(audio_data, sample_rate, silence_segments)
         
         update_progress(0.9, '正在调整音量...', 'processing')
         

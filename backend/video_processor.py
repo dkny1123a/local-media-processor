@@ -7,6 +7,7 @@ import tempfile
 import multiprocessing as mp
 from .adaptive_processor import process_audio_adaptive, apply_highpass_filter
 from .audio_chunk_processor import process_audio_chunks, load_audio_chunk, get_audio_duration, process_chunk_with_timeout
+from .core import apply_loudnorm, encode_to_mp3, resample_audio
 
 
 def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction, silence_threshold, min_silence_duration, sample_rate, result_path):
@@ -304,91 +305,52 @@ def process_video(
                 normalized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
                 normalized_wav.close()
                 normalized_path = normalized_wav.name
-                
-                command = [
-                    'ffmpeg',
-                    '-i', temp_wav_path,
-                    '-af', f'loudnorm=I={target_db}:LRA=11:TP=-1.5',
-                    '-y',
-                    '-loglevel', 'quiet',
-                    normalized_path
-                ]
-                
-                try:
-                    subprocess.run(command, check=True, capture_output=True, timeout=300)
+
+                success = apply_loudnorm(temp_wav_path, normalized_path, target_db=target_db, timeout=300)
+
+                if success:
                     os.unlink(temp_wav_path)
                     temp_wav_path = normalized_path
-                except subprocess.TimeoutExpired:
-                    os.unlink(normalized_path)
-                except:
-                    os.unlink(normalized_path)
+                else:
+                    if os.path.exists(normalized_path):
+                        os.unlink(normalized_path)
             
             if scene in ['cycling', 'cycling_bluetooth', 'bluetooth'] and temp_wav_path:
                 update_progress(0.88, '蓝牙优化（降采样至16kHz）...', 'processing')
                 optimized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
                 optimized_wav.close()
                 optimized_path = optimized_wav.name
-                
-                command = [
-                    'ffmpeg',
-                    '-i', temp_wav_path,
-                    '-ac', '1',
-                    '-ar', '16000',
-                    '-y',
-                    '-loglevel', 'quiet',
-                    optimized_path
-                ]
-                
-                try:
-                    subprocess.run(command, check=True, capture_output=True, timeout=300)
+
+                success = resample_audio(temp_wav_path, optimized_path, target_sample_rate=16000, timeout=300)
+
+                if success:
                     os.unlink(temp_wav_path)
                     temp_wav_path = optimized_path
                     sample_rate = 16000
                     print(f"[Video] 降采样完成: {sample_rate}Hz")
-                except subprocess.TimeoutExpired:
-                    print(f"[Video] 降采样超时")
-                    os.unlink(optimized_path)
-                except Exception as e:
-                    print(f"[Video] 降采样失败: {e}")
-                    os.unlink(optimized_path)
+                else:
+                    print(f"[Video] 降采样失败")
+                    if os.path.exists(optimized_path):
+                        os.unlink(optimized_path)
             
             update_progress(0.9, '正在编码为MP3格式...', 'processing')
-            
+
             if temp_wav_path and os.path.exists(temp_wav_path):
-                command = [
-                    'ffmpeg',
-                    '-i', temp_wav_path,
-                    '-ac', '1',
-                    '-ar', str(sample_rate),
-                    '-c:a', 'libmp3lame',
-                    '-q:a', '2',
-                    '-y',
-                    processed_audio_path
-                ]
-                
-                subprocess.run(command, check=True, capture_output=True, timeout=600)
-                
+                success = encode_to_mp3(temp_wav_path, processed_audio_path, sample_rate, timeout=600)
+                if not success:
+                    raise Exception("MP3编码失败")
                 os.unlink(temp_wav_path)
             else:
                 temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
                 temp_path = temp_wav.name
                 temp_wav.close()
-                
+
                 sf.write(temp_path, processed_audio, sample_rate)
-                
-                command = [
-                    'ffmpeg',
-                    '-i', temp_path,
-                    '-ac', '1',
-                    '-ar', str(sample_rate),
-                    '-c:a', 'libmp3lame',
-                    '-q:a', '2',
-                    '-y',
-                    processed_audio_path
-                ]
-                
-                subprocess.run(command, check=True, capture_output=True, timeout=600)
-                
+
+                success = encode_to_mp3(temp_path, processed_audio_path, sample_rate, timeout=600)
+                if not success:
+                    raise Exception("MP3编码失败")
+
                 os.unlink(temp_path)
             
             processed_info = get_audio_info(processed_audio_path)
