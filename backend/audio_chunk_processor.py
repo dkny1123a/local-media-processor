@@ -4,6 +4,7 @@ import numpy as np
 import librosa
 import tempfile
 import multiprocessing as mp
+import threading
 import time
 import gc
 
@@ -381,7 +382,24 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
     start_time = time.time()
     processed_chunks = []
     
+    progress_lock = threading.Lock()
+    current_chunk_progress = 0
+    progress_thread_running = True
+    
+    def progress_update_thread():
+        nonlocal current_chunk_progress
+        while progress_thread_running:
+            time.sleep(0.5)
+            if progress_callback and current_chunk_progress < 100:
+                with progress_lock:
+                    chunk_pct = current_chunk_progress
+                progress_callback(chunk_pct, f'正在处理块 {int(chunk_pct * num_chunks / 100) + 1}/{num_chunks}...')
+    
     try:
+        if progress_callback:
+            progress_thread = threading.Thread(target=progress_update_thread, daemon=True)
+            progress_thread.start()
+        
         for i in range(num_chunks):
             chunk_start_time = time.time()
             
@@ -393,11 +411,12 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
             if audio_chunk is None or len(audio_chunk) == 0:
                 print(f"[{task_name}] 加载块 {i+1} 失败，跳过")
                 stats["skipped_chunks"] += 1
+                with progress_lock:
+                    current_chunk_progress = int(((i + 1) / num_chunks) * 100)
                 continue
             
-            if progress_callback:
-                progress_callback(int((i / num_chunks) * 100), 
-                                f'正在处理块 {i+1}/{num_chunks}...')
+            with progress_lock:
+                current_chunk_progress = int((i / num_chunks) * 100)
             
             result_file = tempfile.NamedTemporaryFile(suffix='.npy', delete=False)
             result_file.close()
@@ -462,9 +481,14 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
             chunk_time = time.time() - chunk_start_time
             stats["chunk_times"].append(chunk_time)
             
+            with progress_lock:
+                current_chunk_progress = int(((i + 1) / num_chunks) * 100)
+            
             print(f"[{task_name}] 块 {i+1}/{num_chunks} 完成，耗时 {chunk_time:.2f}s")
         
         if processed_chunks:
+            if progress_callback:
+                progress_callback(95, '正在合并处理结果...')
             if temp_wav_files:
                 prev_temp = temp_wav_files.pop()
                 merged_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
@@ -511,6 +535,9 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
             if merge_wav_files(temp_wav_files, temp_wav_path):
                 pass
             
+            if progress_callback:
+                progress_callback(98, '合并完成，准备输出...')
+            
             for wav_file in temp_wav_files:
                 os.unlink(wav_file)
             temp_wav_files = []
@@ -530,7 +557,12 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
                 os.unlink(wav_file)
         temp_wav_files = []
         
+        progress_thread_running = False
+        
         return np.array([]), {"error": str(e)}, None
+    
+    finally:
+        progress_thread_running = False
     
     avg_time = np.mean(stats["chunk_times"]) if stats["chunk_times"] else 0
     max_time = np.max(stats["chunk_times"]) if stats["chunk_times"] else 0

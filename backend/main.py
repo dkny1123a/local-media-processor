@@ -282,7 +282,10 @@ def process_audio_background(
         update_progress(task_id, 'processing', '骑行+蓝牙场景专用处理...', 25)
         
         def progress_callback(pct, msg, status=None):
-            update_progress(task_id, 'processing', msg, 25 + int(pct * 0.5))
+            chunk_progress = 25 + int(pct * 0.55)
+            if chunk_progress > 80:
+                chunk_progress = 80
+            update_progress(task_id, 'processing', msg, chunk_progress)
         
         try:
             processed_audio, cycling_stats, temp_wav_path = process_audio_chunks(
