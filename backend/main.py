@@ -89,6 +89,12 @@ def clear_task_result(task_id):
 @app.on_event("startup")
 async def startup_event():
     init_vad()
+    try:
+        import torch
+        torch.set_num_threads(4)
+        print("[Startup] PyTorch线程数限制为4")
+    except Exception as e:
+        print(f"[Startup] PyTorch配置失败: {e}")
 
 @app.get("/api/media/progress/{task_id}")
 async def get_progress_endpoint(task_id: str):
@@ -240,6 +246,34 @@ def process_audio_background(
             highpass_cutoff = 100.0 if scene == 'cycling' else 0.0
             target_db = -3.0 if scene in ['bluetooth', 'cycling'] else -1.0
         
+        try:
+            from .self_learning import learn_optimal_parameters, record_processing
+            
+            audio_features = {}
+            if analysis:
+                audio_features = {
+                    'noise_floor_db': analysis['noise_floor_db'],
+                    'signal_peak_db': analysis.get('signal_peak_db', -30.0),
+                    'dynamic_range': analysis.get('dynamic_range', 20.0),
+                    'spectral_flatness': analysis.get('spectral_flatness', 0.5),
+                    'spectral_centroid': analysis.get('spectral_centroid', 1000.0),
+                    'sample_rate': sample_rate,
+                }
+            
+            learned_params = learn_optimal_parameters(audio_features, scene)
+            if learned_params:
+                if 'noise_reduction' in learned_params:
+                    noise_reduction = learned_params['noise_reduction']
+                if 'silence_threshold' in learned_params:
+                    silence_threshold = learned_params['silence_threshold']
+                if 'min_silence_duration' in learned_params:
+                    min_silence_duration = learned_params['min_silence_duration']
+                if 'highpass_cutoff' in learned_params:
+                    highpass_cutoff = learned_params['highpass_cutoff']
+                print(f"[Task {task_id}] 自学习参数覆盖: nr={noise_reduction}, hp={highpass_cutoff}, st={silence_threshold}")
+        except Exception as e:
+            print(f"[Task {task_id}] 自学习跳过: {e}")
+        
         converted_path_again, was_converted_again = convert_to_wav(input_path)
         
         temp_wav_path = None
@@ -257,7 +291,7 @@ def process_audio_background(
                 progress_callback=progress_callback,
                 task_name=f"Task {task_id}",
                 scene='cycling_bluetooth',
-                adaptive_chunk=True
+                adaptive_chunk=auto_detect
             )
         except Exception as e:
             print(f"[Task {task_id}] 分块处理失败: {e}")
@@ -424,6 +458,36 @@ def process_audio_background(
         }
         
         print(f"[Task {task_id}] 处理完成: {output_path}")
+        
+        try:
+            from .self_learning import record_processing
+            processing_features = {
+                'noise_floor_db': analysis['noise_floor_db'] if analysis else -50.0,
+                'signal_peak_db': analysis.get('signal_peak_db', -30.0) if analysis else -30.0,
+                'dynamic_range': analysis.get('dynamic_range', 20.0) if analysis else 20.0,
+                'spectral_flatness': audio_features.get('spectral_flatness', 0.5) if 'audio_features' in dir() else 0.5,
+                'spectral_centroid': audio_features.get('spectral_centroid', 1000.0) if 'audio_features' in dir() else 1000.0,
+                'noise_level': analysis.get('noise_level', 'medium') if analysis else 'medium',
+            }
+            processing_params = {
+                'scene': scene,
+                'noise_reduction': noise_reduction,
+                'silence_threshold': silence_threshold,
+                'min_silence_duration': min_silence_duration,
+                'highpass_cutoff': highpass_cutoff,
+                'target_db': target_db,
+            }
+            processing_result = {
+                'original_duration': original_duration,
+                'processed_duration': processed_duration,
+                'kept_ratio': processed_duration / original_duration if original_duration > 0 else 0,
+                'silence_removed_ratio': (original_duration - processed_duration) / original_duration if original_duration > 0 else 0,
+                'duration_reduction_percent': duration_reduction,
+            }
+            record_processing(input_path, processing_features, processing_params, processing_result)
+        except Exception as e:
+            print(f"[Task {task_id}] 自学习记录失败: {e}")
+        
         save_task_result(task_id, result)
         update_progress(task_id, 'complete', '处理完成', 100)
         clear_progress(task_id)

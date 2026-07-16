@@ -74,7 +74,7 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
         chunk_min_silence_duration = min_silence_duration
         chunk_highpass_cutoff = highpass_cutoff
         
-        if adaptive_chunk:
+        if adaptive_chunk and scene not in ['cycling', 'cycling_bluetooth']:
             from .adaptive_processor import analyze_audio_characteristics, calculate_adaptive_parameters
             
             chunk_analysis = analyze_audio_characteristics(audio_chunk, sample_rate)
@@ -84,6 +84,13 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
             chunk_noise_reduction = chunk_params['noise_reduction']
             chunk_min_silence_duration = chunk_params['min_silence_duration']
             chunk_highpass_cutoff = chunk_params['highpass_cutoff']
+        
+        if scene == 'cycling' or scene == 'cycling_bluetooth':
+            try:
+                from .ai_noise_reducer import adaptive_denoise
+                audio_chunk = adaptive_denoise(audio_chunk, sample_rate)
+            except Exception as e:
+                print(f"[FRCRN] 自适应降噪失败: {e}")
         
         if chunk_noise_reduction > 0:
             try:
@@ -109,28 +116,45 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
             audio_chunk = apply_voice_enhancement(audio_chunk, sample_rate)
             audio_chunk = apply_dynamic_range_compression(audio_chunk, sample_rate)
             audio_chunk = apply_intelligibility_boost(audio_chunk, sample_rate)
+            
+            pre_vad_duration = len(audio_chunk) / sample_rate
             audio_chunk, voice_segments = apply_vad_gate(audio_chunk, sample_rate, voice_gain_db=8.0, noise_attenuation_db=-6.0)
             
             total_duration = len(audio_chunk) / sample_rate
             non_voice_segments = []
             last_end = 0.0
+            vad_removed_duration = 0.0
+            
             if voice_segments:
-                for start, end in sorted(voice_segments):
-                    if start > last_end + 0.01:
-                        non_voice_duration = start - last_end
-                        if non_voice_duration >= max(chunk_min_silence_duration, 0.5):
-                            non_voice_segments.append((last_end, start))
-                    last_end = end
+                voice_total_duration = sum(end - start for start, end in voice_segments)
+                voice_ratio = voice_total_duration / pre_vad_duration if pre_vad_duration > 0 else 0
                 
-                if last_end < total_duration - 0.01:
-                    non_voice_duration = total_duration - last_end
-                    if non_voice_duration >= max(chunk_min_silence_duration, 0.5):
-                        non_voice_segments.append((last_end, total_duration))
+                print(f"[VAD] 语音占比: {voice_ratio*100:.1f}%, 检测到{len(voice_segments)}个语音段, 语音时长={voice_total_duration:.1f}s")
+                
+                if voice_ratio < 0.05:
+                    print(f"[VAD] 警告: 语音占比仅{voice_ratio*100:.1f}%, 跳过VAD移除")
+                    non_voice_segments = []
+                else:
+                    for start, end in sorted(voice_segments):
+                        if start > last_end + 0.01:
+                            non_voice_duration = start - last_end
+                            if non_voice_duration >= max(chunk_min_silence_duration, 1.0):
+                                non_voice_segments.append((last_end, start))
+                                vad_removed_duration += non_voice_duration
+                        last_end = end
+                    
+                    if last_end < total_duration - 0.01:
+                        non_voice_duration = total_duration - last_end
+                        if non_voice_duration >= max(chunk_min_silence_duration, 1.0):
+                            non_voice_segments.append((last_end, total_duration))
+                            vad_removed_duration += non_voice_duration
+            else:
+                print(f"[VAD] 未检测到语音段")
             
             non_voice_count = len(non_voice_segments)
             
             if non_voice_count > 0:
-                print(f"[VAD] 检测到{non_voice_count}个无人声段")
+                print(f"[VAD] 移除{non_voice_count}个无人声段, 总时长={vad_removed_duration:.1f}s")
                 
                 soft_boundary_ms = 50
                 soft_boundary_samples = int(sample_rate * soft_boundary_ms / 1000)
@@ -163,17 +187,31 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                         result_segments.append(segment)
                     
                     audio_chunk = np.concatenate(result_segments)
+            
+            post_vad_duration = len(audio_chunk) / sample_rate
+            print(f"[VAD] 处理前={pre_vad_duration:.1f}s, 处理后={post_vad_duration:.1f}s, VAD移除={vad_removed_duration:.1f}s")
         elif chunk_highpass_cutoff > 0:
             audio_chunk = apply_highpass_filter(audio_chunk, sample_rate, chunk_highpass_cutoff)
 
-        silence_segments = detect_silence(
-            audio_chunk,
-            sample_rate,
-            threshold_dbfs=chunk_silence_threshold,
-            min_silence_duration=chunk_min_silence_duration,
-        )
+        pre_silence_duration = len(audio_chunk) / sample_rate
+        
+        if scene not in ['cycling', 'cycling_bluetooth']:
+            silence_segments = detect_silence(
+                audio_chunk,
+                sample_rate,
+                threshold_dbfs=chunk_silence_threshold,
+                min_silence_duration=chunk_min_silence_duration,
+            )
+        else:
+            silence_segments = detect_silence(
+                audio_chunk,
+                sample_rate,
+                threshold_dbfs=-35.0,
+                min_silence_duration=5.0,
+            )
 
         silence_count = len(silence_segments)
+        silence_removed_duration = sum(end - start for start, end in silence_segments)
 
         db = None
         if silence_count > 0:
@@ -182,12 +220,17 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
             hop_length = int(sample_rate * 0.01)
             rms = librosa.feature.rms(y=audio_chunk, frame_length=frame_length, hop_length=hop_length)
             db = librosa.amplitude_to_db(rms, ref=1.0)
-            silence_ratio = float(np.mean(db < chunk_silence_threshold))
+            threshold = chunk_silence_threshold if scene not in ['cycling', 'cycling_bluetooth'] else -40.0
+            silence_ratio = float(np.mean(db < threshold))
             if silence_ratio > 0.1:
-                print(f"[Silence] dB范围: [{np.min(db):.1f}, {np.max(db):.1f}], 阈值={chunk_silence_threshold}, 静音比例={silence_ratio*100:.1f}%, 检测到{silence_count}个静音段")
+                print(f"[Silence] dB范围: [{np.min(db):.1f}, {np.max(db):.1f}], 阈值={threshold}, 静音比例={silence_ratio*100:.1f}%, 检测到{silence_count}个静音段, 移除时长={silence_removed_duration:.1f}s")
 
         if silence_segments:
             audio_chunk = remove_silence(audio_chunk, sample_rate, silence_segments)
+        
+        post_silence_duration = len(audio_chunk) / sample_rate
+        if silence_removed_duration > 0:
+            print(f"[Silence] 处理前={pre_silence_duration:.1f}s, 处理后={post_silence_duration:.1f}s, 移除={silence_removed_duration:.1f}s")
 
         return audio_chunk, silence_count, non_voice_count
     except Exception:
@@ -336,6 +379,7 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
     }
     
     start_time = time.time()
+    processed_chunks = []
     
     try:
         for i in range(num_chunks):
@@ -377,38 +421,81 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
                 stats["timeout_chunks"] += 1
                 print(f"[{task_name}] 块 {i+1} 超时或失败，保留原始音频")
             
-            temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            temp_wav.close()
-            temp_wav_path = temp_wav.name
-            
-            write_single_chunk_to_wav(chunk_to_save, sample_rate, temp_wav_path)
-            current_batch.append(temp_wav_path)
+            processed_chunks.append(chunk_to_save)
             
             del audio_chunk, result, chunk_to_save
             gc.collect()
             
-            if len(current_batch) >= BATCH_SIZE or (i == num_chunks - 1 and current_batch):
-                merged_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-                merged_temp.close()
-                merged_path = merged_temp.name
-                
-                if merge_wav_files(current_batch, merged_path):
-                    temp_wav_files.append(merged_path)
-                    stats["temp_files_created"] += 1
+            if len(processed_chunks) >= BATCH_SIZE:
+                if temp_wav_files:
+                    prev_temp = temp_wav_files.pop()
+                    merged_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                    merged_temp.close()
+                    merged_path = merged_temp.name
                     
-                    for wav_file in current_batch:
-                        os.unlink(wav_file)
+                    prev_audio, _ = librosa.load(prev_temp, sr=sample_rate, mono=True)
+                    os.unlink(prev_temp)
+                    
+                    current_batch_audio = np.concatenate(processed_chunks)
+                    combined = np.concatenate([prev_audio, current_batch_audio])
+                    
+                    import soundfile as sf
+                    sf.write(merged_path, combined, sample_rate)
+                    
+                    temp_wav_files.append(merged_path)
+                    del prev_audio, current_batch_audio, combined
                 else:
-                    temp_wav_files.extend(current_batch)
-                    stats["temp_files_created"] += len(current_batch)
+                    current_batch_audio = np.concatenate(processed_chunks)
+                    batch_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                    batch_temp.close()
+                    batch_path = batch_temp.name
+                    
+                    import soundfile as sf
+                    sf.write(batch_path, current_batch_audio, sample_rate)
+                    
+                    temp_wav_files.append(batch_path)
+                    del current_batch_audio
                 
-                current_batch = []
+                processed_chunks = []
                 gc.collect()
             
             chunk_time = time.time() - chunk_start_time
             stats["chunk_times"].append(chunk_time)
             
             print(f"[{task_name}] 块 {i+1}/{num_chunks} 完成，耗时 {chunk_time:.2f}s")
+        
+        if processed_chunks:
+            if temp_wav_files:
+                prev_temp = temp_wav_files.pop()
+                merged_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                merged_temp.close()
+                merged_path = merged_temp.name
+                
+                prev_audio, _ = librosa.load(prev_temp, sr=sample_rate, mono=True)
+                os.unlink(prev_temp)
+                
+                current_batch_audio = np.concatenate(processed_chunks)
+                combined = np.concatenate([prev_audio, current_batch_audio])
+                
+                import soundfile as sf
+                sf.write(merged_path, combined, sample_rate)
+                
+                temp_wav_files.append(merged_path)
+                del prev_audio, current_batch_audio, combined
+            else:
+                current_batch_audio = np.concatenate(processed_chunks)
+                batch_temp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                batch_temp.close()
+                batch_path = batch_temp.name
+                
+                import soundfile as sf
+                sf.write(batch_path, current_batch_audio, sample_rate)
+                
+                temp_wav_files.append(batch_path)
+                del current_batch_audio
+            
+            processed_chunks = []
+            gc.collect()
         
         stats["total_time"] = time.time() - start_time
         

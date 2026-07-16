@@ -49,6 +49,9 @@ def analyze_audio_characteristics(
     audio_data: np.ndarray,
     sample_rate: int
 ) -> Dict[str, Any]:
+    from .core.audio_analyzer import analyze_audio_spectrum
+    base = analyze_audio_spectrum(audio_data, sample_rate)
+    
     frame_length = int(sample_rate * 0.02)
     hop_length = int(sample_rate * 0.01)
     
@@ -57,7 +60,6 @@ def analyze_audio_characteristics(
     analysis_samples = int(sample_rate * analysis_duration)
     
     all_rms = []
-    all_db = []
     num_segments = min(10, max(1, total_samples // analysis_samples))
     
     for i in range(num_segments):
@@ -71,68 +73,32 @@ def analyze_audio_characteristics(
         all_rms.extend(rms)
     
     if len(all_rms) == 0:
-        return {
-            'rms_mean': 0.0,
-            'rms_median': 0.0,
-            'rms_std': 0.0,
-            'rms_min': 0.0,
-            'rms_max': 0.0,
-            'noise_floor_db': -80.0,
-            'signal_peak_db': -80.0,
-            'signal_to_noise_ratio': 0.0,
-            'dynamic_range': 0.0,
-            'rms_coefficient_of_variation': 0.0,
-            'silence_ratio_50db': 0.0,
-            'silence_ratio_45db': 0.0,
-            'silence_ratio_40db': 0.0,
-            'avg_quiet_frame_db': 0.0,
-            'avg_loud_frame_db': 0.0
-        }
-    
-    rms_array = np.array(all_rms)
-    
-    rms_mean = np.mean(rms_array)
-    rms_median = np.median(rms_array)
-    rms_std = np.std(rms_array)
-    rms_min = np.min(rms_array)
-    rms_max = np.max(rms_array)
-    
-    rms_db = librosa.amplitude_to_db(rms_array, ref=1.0)
-    
-    noise_floor_db = np.percentile(rms_db, 3)
-    signal_peak_db = np.percentile(rms_db, 97)
-    
-    dynamic_range = signal_peak_db - noise_floor_db
-    
-    rms_coefficient_of_variation = rms_std / rms_mean if rms_mean > 0 else 0.0
-    
-    snr_raw = signal_peak_db - noise_floor_db
-    
-    quiet_frames = rms_db[rms_db < np.percentile(rms_db, 20)]
-    loud_frames = rms_db[rms_db > np.percentile(rms_db, 80)]
-    avg_quiet_frame_db = np.mean(quiet_frames) if len(quiet_frames) > 0 else noise_floor_db
-    avg_loud_frame_db = np.mean(loud_frames) if len(loud_frames) > 0 else signal_peak_db
+        rms_db = np.array([-80.0])
+    else:
+        rms_db = librosa.amplitude_to_db(np.array(all_rms), ref=1.0)
     
     silence_ratio_50db = float(np.mean(rms_db < -50))
     silence_ratio_45db = float(np.mean(rms_db < -45))
     silence_ratio_40db = float(np.mean(rms_db < -40))
     
+    rms_array = np.array(all_rms) if all_rms else np.array([0])
+    rms_mean = float(np.mean(rms_array))
+    rms_std = float(np.std(rms_array))
+    
     return {
-        'rms_mean': float(rms_mean),
-        'rms_median': float(rms_median),
-        'rms_std': float(rms_std),
-        'rms_min': float(rms_min),
-        'rms_max': float(rms_max),
-        'noise_floor_db': float(noise_floor_db),
-        'signal_peak_db': float(signal_peak_db),
-        'signal_to_noise_ratio': float(snr_raw),
-        'dynamic_range': float(dynamic_range),
-        'rms_coefficient_of_variation': float(rms_coefficient_of_variation),
+        **base,
+        'rms_mean': rms_mean,
+        'rms_median': float(np.median(rms_array)),
+        'rms_std': rms_std,
+        'rms_min': float(np.min(rms_array)),
+        'rms_max': float(np.max(rms_array)),
+        'signal_to_noise_ratio': base['dynamic_range'],
+        'rms_coefficient_of_variation': rms_std / rms_mean if rms_mean > 0 else 0.0,
         'silence_ratio_50db': silence_ratio_50db,
         'silence_ratio_45db': silence_ratio_45db,
         'silence_ratio_40db': silence_ratio_40db,
-        'avg_quiet_frame_db': float(avg_quiet_frame_db),
-        'avg_loud_frame_db': float(avg_loud_frame_db)
+        'avg_quiet_frame_db': float(np.mean(rms_db[rms_db < np.percentile(rms_db, 20)])) if len(rms_db) > 0 else base['noise_floor_db'],
+        'avg_loud_frame_db': float(np.mean(rms_db[rms_db > np.percentile(rms_db, 80)])) if len(rms_db) > 0 else base['signal_peak_db']
     }
 
 
