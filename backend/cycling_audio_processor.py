@@ -9,11 +9,20 @@ import numpy as np
 from .core import apply_fade, apply_loudnorm
 
 
+def apply_preemphasis(audio_data: np.ndarray, coefficient: float = 0.97) -> np.ndarray:
+    try:
+        preemphasized = np.append(audio_data[0], audio_data[1:] - coefficient * audio_data[:-1])
+        return preemphasized
+    except Exception as e:
+        print(f"预加重滤波器失败: {e}")
+        return audio_data
+
+
 def apply_dynamic_range_compression(
     audio_data: np.ndarray,
     sample_rate: int,
-    ratio: float = 4.0,
-    threshold_db: float = -20.0,
+    ratio: float = 8.0,
+    threshold_db: float = -18.0,
 ) -> np.ndarray:
     try:
         rms = librosa.feature.rms(y=audio_data)[0]
@@ -138,16 +147,18 @@ def apply_voice_enhancement(audio_data: np.ndarray, sample_rate: int) -> np.ndar
 
         voice_mask = np.zeros_like(magnitude)
         for i, freq in enumerate(freq_bins):
-            if 300 <= freq <= 3400:
-                voice_mask[i] = 1.2
-            elif 4000 <= freq <= 8000:
-                voice_mask[i] = 0.4
+            if 300 <= freq <= 2000:
+                voice_mask[i] = 1.1
+            elif 2000 < freq <= 4000:
+                voice_mask[i] = 1.5
+            elif 4000 < freq <= 6000:
+                voice_mask[i] = 1.3
             elif 80 <= freq < 300:
-                voice_mask[i] = 0.6
-            elif 3400 < freq < 4000:
-                voice_mask[i] = 0.8
+                voice_mask[i] = 0.7
+            elif 6000 < freq <= 8000:
+                voice_mask[i] = 0.5
 
-        enhanced_magnitude = magnitude * (1 + voice_mask * 0.5)
+        enhanced_magnitude = magnitude * (1 + voice_mask * 0.4)
 
         enhanced_stft = enhanced_magnitude * phase
         enhanced_audio = librosa.istft(enhanced_stft, hop_length=256)
@@ -233,20 +244,32 @@ def apply_intelligibility_boost(audio_data: np.ndarray, sample_rate: int) -> np.
 
         for i, freq in enumerate(freq_bins):
             for j in range(magnitude.shape[1]):
-                if 300 <= freq <= 3400:
+                if 2000 <= freq <= 4000:
+                    if db[j] < -35:
+                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.6
+                    elif db[j] < -25:
+                        boost_db = min(15, (-25 - db[j]) * 2.5)
+                        enhanced_magnitude[i, j] = magnitude[i, j] * (10 ** (boost_db / 20))
+                    elif db[j] < -10:
+                        boost_db = (-10 - db[j]) * 0.8
+                        enhanced_magnitude[i, j] = magnitude[i, j] * (10 ** (boost_db / 20))
+                elif 300 <= freq < 2000:
                     if db[j] < -35:
                         enhanced_magnitude[i, j] = magnitude[i, j] * 0.5
                     elif db[j] < -25:
-                        boost_db = min(10, (-25 - db[j]) * 2)
+                        boost_db = min(10, (-25 - db[j]) * 1.5)
                         enhanced_magnitude[i, j] = magnitude[i, j] * (10 ** (boost_db / 20))
-                    elif db[j] < -10:
-                        boost_db = (-10 - db[j]) * 0.5
-                        enhanced_magnitude[i, j] = magnitude[i, j] * (10 ** (boost_db / 20))
-                elif 80 <= freq < 300 or 3400 < freq <= 8000:
+                elif 4000 < freq <= 6000:
                     if db[j] < -35:
-                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.3
+                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.5
                     elif db[j] < -25:
-                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.7
+                        boost_db = min(8, (-25 - db[j]) * 1.2)
+                        enhanced_magnitude[i, j] = magnitude[i, j] * (10 ** (boost_db / 20))
+                elif 80 <= freq < 300 or 6000 < freq <= 8000:
+                    if db[j] < -35:
+                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.4
+                    elif db[j] < -25:
+                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.8
                 else:
                     if db[j] < -30:
                         enhanced_magnitude[i, j] = magnitude[i, j] * 0.3
@@ -278,8 +301,8 @@ def apply_bluetooth_optimization(audio_data: np.ndarray, sample_rate: int) -> np
             else audio_data
         )
 
-        target_sample_rate = 16000
-        if sample_rate != target_sample_rate:
+        target_sample_rate = 44100
+        if sample_rate > target_sample_rate:
             audio_normalized = librosa.resample(
                 audio_normalized, orig_sr=sample_rate, target_sr=target_sample_rate
             )
@@ -377,6 +400,7 @@ def process_single_cycling_chunk(
             except Exception as e:
                 print(f"[Cycling] 降噪失败: {e}")
 
+        audio_chunk = apply_preemphasis(audio_chunk)
         audio_chunk = apply_bandpass_filter(audio_chunk, sample_rate)
         audio_chunk = apply_voice_enhancement(audio_chunk, sample_rate)
         audio_chunk = apply_dynamic_range_compression(audio_chunk, sample_rate)

@@ -95,24 +95,30 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
         
         if chunk_noise_reduction > 0:
             try:
-                import noisereduce as nr
-                reduced_chunk = nr.reduce_noise(
-                    y=audio_chunk,
-                    sr=sample_rate,
-                    prop_decrease=chunk_noise_reduction,
-                    stationary=False
-                )
-                audio_chunk = audio_chunk * (1 - chunk_noise_reduction) + reduced_chunk * chunk_noise_reduction
-                del reduced_chunk
-                gc.collect()
+                from .core.audio_analyzer import analyze_audio_spectrum
+                spectrum = analyze_audio_spectrum(audio_chunk, sample_rate)
+                if spectrum.get('noise_level') != 'low':
+                    import noisereduce as nr
+                    reduced_chunk = nr.reduce_noise(
+                        y=audio_chunk,
+                        sr=sample_rate,
+                        prop_decrease=chunk_noise_reduction,
+                        stationary=False
+                    )
+                    audio_chunk = audio_chunk * (1 - chunk_noise_reduction) + reduced_chunk * chunk_noise_reduction
+                    del reduced_chunk
+                    gc.collect()
+                else:
+                    print(f"[Denoise] 低噪声环境，跳过传统降噪")
             except Exception:
                 pass
         
         if scene == 'cycling' or scene == 'cycling_bluetooth':
             from .cycling_audio_processor import apply_bandpass_filter, apply_voice_enhancement
             from .cycling_audio_processor import apply_dynamic_range_compression, apply_intelligibility_boost
-            from .cycling_audio_processor import apply_vad_gate
+            from .cycling_audio_processor import apply_vad_gate, apply_preemphasis
             
+            audio_chunk = apply_preemphasis(audio_chunk)
             audio_chunk = apply_bandpass_filter(audio_chunk, sample_rate)
             audio_chunk = apply_voice_enhancement(audio_chunk, sample_rate)
             audio_chunk = apply_dynamic_range_compression(audio_chunk, sample_rate)

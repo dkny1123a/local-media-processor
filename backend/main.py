@@ -300,34 +300,38 @@ def process_audio_background(
             print(f"[Task {task_id}] 分块处理失败: {e}")
             raise
         
-        update_progress(task_id, 'processing', '蓝牙优化（降采样至16kHz）...', 85)
+        update_progress(task_id, 'processing', '蓝牙优化（降采样至44.1kHz）...', 85)
 
         optimized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
         optimized_wav.close()
         optimized_path = optimized_wav.name
         
-        command = [
-            'ffmpeg',
-            '-i', temp_wav_path,
-            '-ac', '1',
-            '-ar', '16000',
-            '-y',
-            '-loglevel', 'quiet',
-            optimized_path
-        ]
-        
-        try:
-            subprocess.run(command, check=True, capture_output=True, timeout=300)
-            os.unlink(temp_wav_path)
-            temp_wav_path = optimized_path
-            sample_rate = 16000
-            print(f"[Task {task_id}] 降采样完成: {sample_rate}Hz")
-        except subprocess.TimeoutExpired:
-            print(f"[Task {task_id}] 降采样超时")
-            os.unlink(optimized_path)
-        except Exception as e:
-            print(f"[Task {task_id}] 降采样失败: {e}")
-            os.unlink(optimized_path)
+        target_sample_rate = 44100
+        if sample_rate > target_sample_rate:
+            command = [
+                'ffmpeg',
+                '-i', temp_wav_path,
+                '-ac', '1',
+                '-ar', str(target_sample_rate),
+                '-y',
+                '-loglevel', 'quiet',
+                optimized_path
+            ]
+            
+            try:
+                subprocess.run(command, check=True, capture_output=True, timeout=300)
+                os.unlink(temp_wav_path)
+                temp_wav_path = optimized_path
+                sample_rate = target_sample_rate
+                print(f"[Task {task_id}] 降采样完成: {sample_rate}Hz")
+            except subprocess.TimeoutExpired:
+                print(f"[Task {task_id}] 降采样超时")
+                os.unlink(optimized_path)
+            except Exception as e:
+                print(f"[Task {task_id}] 降采样失败: {e}")
+                os.unlink(optimized_path)
+        else:
+            print(f"[Task {task_id}] 采样率{sample_rate}Hz无需降采样")
         
         if was_converted_again and os.path.exists(converted_path_again):
             os.unlink(converted_path_again)
