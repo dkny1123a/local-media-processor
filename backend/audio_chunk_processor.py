@@ -239,6 +239,10 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
         if silence_removed_duration > 0:
             print(f"[Silence] 处理前={pre_silence_duration:.1f}s, 处理后={post_silence_duration:.1f}s, 移除={silence_removed_duration:.1f}s")
 
+        if scene == 'cycling' or scene == 'cycling_bluetooth':
+            from .cycling_audio_processor import apply_deemphasis
+            audio_chunk = apply_deemphasis(audio_chunk)
+
         return audio_chunk, silence_count, non_voice_count
     except Exception:
         return audio_chunk, 0, 0
