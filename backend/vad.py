@@ -58,9 +58,10 @@ def detect_voice_segments(audio_data, sample_rate, min_speech_duration=0.3, min_
             if audio_data.dtype != np.float32:
                 audio_data = audio_data.astype(np.float32)
 
+            # 归一化到峰值0.9，确保低音量录音也能被Silero VAD正确检测
             max_val = np.max(np.abs(audio_data))
-            if max_val > 1.0 and max_val > 0:
-                audio_data = audio_data / max_val
+            if max_val > 0:
+                audio_data = audio_data * (0.9 / max_val)
 
             torch.set_num_threads(1)
             audio_tensor = torch.from_numpy(audio_data)
@@ -75,6 +76,21 @@ def detect_voice_segments(audio_data, sample_rate, min_speech_duration=0.3, min_
             )
 
             segments = [(s['start'], s['end']) for s in speech_timestamps]
+
+            # 回退机制：如果Silero未检测到语音但音频有能量，使用能量VAD
+            if not segments:
+                rms = np.sqrt(np.mean(audio_data ** 2))
+                rms_db = 20 * np.log10(rms + 1e-10)
+                if rms_db > -80:
+                    print(f"[VAD] Silero未检测到语音(RMS={rms_db:.1f}dB)，回退到能量VAD")
+                    return _energy_based_vad(audio_data, sample_rate, min_speech_duration, min_silence_duration)
+
+            # 回退机制：如果Silero检测到语音占比过低（<10%），可能漏检低能量语音
+            total_duration = len(audio_data) / sample_rate
+            voice_duration = sum(end - start for start, end in segments)
+            if total_duration > 0 and voice_duration / total_duration < 0.10:
+                print(f"[VAD] Silero检测语音占比过低({voice_duration/total_duration*100:.1f}%)，回退到能量VAD")
+                return _energy_based_vad(audio_data, sample_rate, min_speech_duration, min_silence_duration)
 
             return segments
 
