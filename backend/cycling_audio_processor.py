@@ -20,11 +20,8 @@ def apply_preemphasis(audio_data: np.ndarray, coefficient: float = 0.97) -> np.n
 
 def apply_deemphasis(audio_data: np.ndarray, coefficient: float = 0.97) -> np.ndarray:
     try:
-        deemphasized = np.zeros_like(audio_data)
-        deemphasized[0] = audio_data[0]
-        for i in range(1, len(audio_data)):
-            deemphasized[i] = audio_data[i] + coefficient * deemphasized[i-1]
-        return deemphasized
+        from scipy.signal import lfilter
+        return lfilter([1.0], [1.0, -coefficient], audio_data)
     except Exception as e:
         print(f"去加重滤波器失败: {e}")
         return audio_data
@@ -33,36 +30,37 @@ def apply_deemphasis(audio_data: np.ndarray, coefficient: float = 0.97) -> np.nd
 def apply_dynamic_range_compression(
     audio_data: np.ndarray,
     sample_rate: int,
-    ratio: float = 5.0,
-    threshold_db: float = -18.0,
-    knee_db: float = 3.0,
+    ratio: float = 2.5,
+    threshold_db: float = -25.0,
+    knee_db: float = 6.0,
+    makeup_gain_db: float = 0.0,
 ) -> np.ndarray:
     try:
-        rms = librosa.feature.rms(y=audio_data)[0]
-        rms_db = librosa.amplitude_to_db(rms, ref=1.0)
-
-        gain_db = np.zeros_like(rms_db)
-        for i, db in enumerate(rms_db):
-            if db > threshold_db + knee_db:
-                gain_db[i] = (threshold_db - db) / ratio
-            elif db > threshold_db - knee_db:
-                gain_db[i] = ((threshold_db - db) / ratio) * ((db - threshold_db + knee_db) / (2 * knee_db)) ** 2
-
-        gain = librosa.db_to_amplitude(gain_db)
-
         frame_length = int(sample_rate * 0.05)
         hop_length = int(sample_rate * 0.025)
 
-        compressed_audio = np.zeros_like(audio_data)
-        for i in range(len(gain)):
-            start = i * hop_length
-            end = min(start + frame_length, len(audio_data))
-            if start < len(audio_data):
-                compressed_audio[start:end] = audio_data[start:end] * gain[i]
+        rms = librosa.feature.rms(y=audio_data, frame_length=frame_length, hop_length=hop_length)[0]
+        rms_db = librosa.amplitude_to_db(rms, ref=1.0)
 
-        max_val = np.max(np.abs(compressed_audio))
-        if max_val > 0.9:
-            compressed_audio = compressed_audio * 0.9 / max_val
+        gain_db = np.zeros_like(rms_db)
+
+        above_knee = rms_db > threshold_db + knee_db
+        in_knee = (rms_db > threshold_db - knee_db) & (~above_knee)
+
+        gain_db[above_knee] = (threshold_db - rms_db[above_knee]) * (1 - 1.0 / ratio)
+
+        knee_input = rms_db[in_knee] - threshold_db + knee_db
+        gain_db[in_knee] = (1 - 1.0 / ratio) * knee_input ** 2 / (4 * knee_db)
+
+        gain_db += makeup_gain_db
+
+        gain = librosa.db_to_amplitude(gain_db)
+
+        gain_expanded = np.repeat(gain, hop_length)[:len(audio_data)]
+        if len(gain_expanded) < len(audio_data):
+            gain_expanded = np.pad(gain_expanded, (0, len(audio_data) - len(gain_expanded)), 'edge')
+
+        compressed_audio = audio_data * gain_expanded
 
         return compressed_audio
     except Exception as e:
@@ -149,38 +147,37 @@ def apply_bandpass_filter(
 
 def apply_voice_enhancement(audio_data: np.ndarray, sample_rate: int) -> np.ndarray:
     try:
-        audio_normalized = (
-            audio_data / np.max(np.abs(audio_data))
-            if np.max(np.abs(audio_data)) > 0
-            else audio_data
-        )
+        n_fft = 512
+        hop_length = 256
 
-        stft = librosa.stft(audio_normalized, n_fft=512, hop_length=256)
+        stft = librosa.stft(audio_data, n_fft=n_fft, hop_length=hop_length)
         magnitude, phase = librosa.magphase(stft)
 
-        freq_bins = librosa.fft_frequencies(sr=sample_rate, n_fft=512)
+        freq_bins = librosa.fft_frequencies(sr=sample_rate, n_fft=n_fft)
 
-        voice_mask = np.zeros_like(magnitude)
+        voice_mask = np.ones(len(freq_bins))
         for i, freq in enumerate(freq_bins):
             if 300 <= freq <= 2000:
-                voice_mask[i] = 1.05
+                voice_mask[i] = 1.10
             elif 2000 < freq <= 4000:
-                voice_mask[i] = 1.2
+                voice_mask[i] = 1.20
             elif 4000 < freq <= 6000:
-                voice_mask[i] = 1.1
+                voice_mask[i] = 1.08
             elif 80 <= freq < 300:
-                voice_mask[i] = 0.8
+                voice_mask[i] = 0.85
             elif 6000 < freq <= 8000:
-                voice_mask[i] = 0.7
+                voice_mask[i] = 0.70
 
-        enhanced_magnitude = magnitude * (1 + voice_mask * 0.3)
+        enhanced_magnitude = magnitude * voice_mask[:, np.newaxis]
 
         enhanced_stft = enhanced_magnitude * phase
-        enhanced_audio = librosa.istft(enhanced_stft, hop_length=256)
+        enhanced_audio = librosa.istft(enhanced_stft, hop_length=hop_length)
 
-        max_val = np.max(np.abs(enhanced_audio))
-        if max_val > 0.95:
-            enhanced_audio = enhanced_audio * 0.95 / max_val
+        if len(enhanced_audio) > len(audio_data):
+            enhanced_audio = enhanced_audio[:len(audio_data)]
+        elif len(enhanced_audio) < len(audio_data):
+            padding = np.zeros(len(audio_data) - len(enhanced_audio))
+            enhanced_audio = np.concatenate([enhanced_audio, padding])
 
         return enhanced_audio
     except Exception as e:
@@ -236,69 +233,63 @@ def detect_voice_activity(
 
 def apply_intelligibility_boost(audio_data: np.ndarray, sample_rate: int) -> np.ndarray:
     try:
-        audio_normalized = (
-            audio_data / np.max(np.abs(audio_data))
-            if np.max(np.abs(audio_data)) > 0
-            else audio_data
-        )
-
-        frame_length = int(sample_rate * 0.02)
+        n_fft = 512
         hop_length = int(sample_rate * 0.01)
 
-        stft = librosa.stft(audio_normalized, n_fft=512, hop_length=hop_length)
+        stft = librosa.stft(audio_data, n_fft=n_fft, hop_length=hop_length)
         magnitude, phase = librosa.magphase(stft)
 
-        freq_bins = librosa.fft_frequencies(sr=sample_rate, n_fft=512)
+        freq_bins = librosa.fft_frequencies(sr=sample_rate, n_fft=n_fft)
+        num_frames = magnitude.shape[1]
 
-        rms = librosa.feature.rms(y=audio_normalized, frame_length=frame_length, hop_length=hop_length)[0]
+        frame_length_rms = int(sample_rate * 0.02)
+        rms = librosa.feature.rms(y=audio_data, frame_length=frame_length_rms, hop_length=hop_length)[0]
         db = librosa.amplitude_to_db(rms, ref=1.0)
 
-        enhanced_magnitude = magnitude.copy()
+        if len(db) != num_frames:
+            db = np.interp(
+                np.linspace(0, len(db) - 1, num_frames),
+                np.arange(len(db)),
+                db
+            )
 
+        freq_gain = np.ones(len(freq_bins))
+        voice_band = np.zeros(len(freq_bins), dtype=bool)
         for i, freq in enumerate(freq_bins):
-            for j in range(magnitude.shape[1]):
-                if 2000 <= freq <= 4000:
-                    if db[j] < -35:
-                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.7
-                    elif db[j] < -25:
-                        boost_db = min(10, (-25 - db[j]) * 1.5)
-                        enhanced_magnitude[i, j] = magnitude[i, j] * (10 ** (boost_db / 20))
-                    elif db[j] < -10:
-                        boost_db = (-10 - db[j]) * 0.5
-                        enhanced_magnitude[i, j] = magnitude[i, j] * (10 ** (boost_db / 20))
-                elif 300 <= freq < 2000:
-                    if db[j] < -35:
-                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.6
-                    elif db[j] < -25:
-                        boost_db = min(6, (-25 - db[j]) * 1.0)
-                        enhanced_magnitude[i, j] = magnitude[i, j] * (10 ** (boost_db / 20))
-                elif 4000 < freq <= 6000:
-                    if db[j] < -35:
-                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.6
-                    elif db[j] < -25:
-                        boost_db = min(5, (-25 - db[j]) * 0.8)
-                        enhanced_magnitude[i, j] = magnitude[i, j] * (10 ** (boost_db / 20))
-                elif 80 <= freq < 300 or 6000 < freq <= 8000:
-                    if db[j] < -35:
-                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.5
-                    elif db[j] < -25:
-                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.85
-                else:
-                    if db[j] < -30:
-                        enhanced_magnitude[i, j] = magnitude[i, j] * 0.4
+            if 300 <= freq <= 2000:
+                freq_gain[i] = 1.10
+                voice_band[i] = True
+            elif 2000 < freq <= 4000:
+                freq_gain[i] = 1.20
+                voice_band[i] = True
+            elif 4000 < freq <= 6000:
+                freq_gain[i] = 1.08
+                voice_band[i] = True
+            elif 80 <= freq < 300:
+                freq_gain[i] = 0.85
+            elif 6000 < freq <= 8000:
+                freq_gain[i] = 0.70
 
+        low_db = db < -45
+        mid_db = (db >= -45) & (db < -30)
+
+        non_voice_extra = np.ones(num_frames)
+        non_voice_extra[low_db] = 0.70
+        non_voice_extra[mid_db] = 0.85
+
+        gain_matrix = np.ones((len(freq_bins), num_frames))
+        gain_matrix[voice_band, :] = freq_gain[voice_band, np.newaxis]
+        gain_matrix[~voice_band, :] = freq_gain[~voice_band, np.newaxis] * non_voice_extra[np.newaxis, :]
+
+        enhanced_magnitude = magnitude * gain_matrix
         enhanced_stft = enhanced_magnitude * phase
         enhanced_audio = librosa.istft(enhanced_stft, hop_length=hop_length)
 
-        if len(enhanced_audio) > len(audio_normalized):
-            enhanced_audio = enhanced_audio[:len(audio_normalized)]
-        elif len(enhanced_audio) < len(audio_normalized):
-            padding = np.zeros(len(audio_normalized) - len(enhanced_audio))
+        if len(enhanced_audio) > len(audio_data):
+            enhanced_audio = enhanced_audio[:len(audio_data)]
+        elif len(enhanced_audio) < len(audio_data):
+            padding = np.zeros(len(audio_data) - len(enhanced_audio))
             enhanced_audio = np.concatenate([enhanced_audio, padding])
-
-        max_val = np.max(np.abs(enhanced_audio))
-        if max_val > 0.95:
-            enhanced_audio = enhanced_audio * 0.95 / max_val
 
         return enhanced_audio
     except Exception as e:
@@ -330,8 +321,8 @@ def apply_bluetooth_optimization(audio_data: np.ndarray, sample_rate: int) -> np
 def apply_vad_gate(
     audio_data: np.ndarray,
     sample_rate: int,
-    voice_gain_db: float = 8.0,
-    noise_attenuation_db: float = -6.0,
+    voice_gain_db: float = 3.0,
+    noise_attenuation_db: float = -3.0,
 ) -> tuple:
     try:
         from .vad import detect_voice_segments

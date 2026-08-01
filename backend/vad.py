@@ -41,47 +41,108 @@ def get_vad_model():
     return _vad_model
 
 
-def detect_voice_segments(audio_data, sample_rate, min_speech_duration=0.3, min_silence_duration=0.5, 
+def detect_voice_segments(audio_data, sample_rate, min_speech_duration=0.3, min_silence_duration=0.5,
                           threshold=0.5):
     vad_model = get_vad_model()
-    
-    if vad_model is None:
-        return [(0.0, len(audio_data) / sample_rate)]
-    
+
+    if vad_model is not None:
+        try:
+            from silero_vad import get_speech_timestamps
+            import torch
+
+            if sample_rate not in [8000, 16000]:
+                import librosa
+                audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
+                sample_rate = 16000
+
+            if audio_data.dtype != np.float32:
+                audio_data = audio_data.astype(np.float32)
+
+            max_val = np.max(np.abs(audio_data))
+            if max_val > 1.0 and max_val > 0:
+                audio_data = audio_data / max_val
+
+            torch.set_num_threads(1)
+            audio_tensor = torch.from_numpy(audio_data)
+
+            speech_timestamps = get_speech_timestamps(
+                audio_tensor,
+                vad_model,
+                threshold=threshold,
+                min_silence_duration_ms=int(min_silence_duration * 1000),
+                min_speech_duration_ms=int(min_speech_duration * 1000),
+                return_seconds=True
+            )
+
+            segments = [(s['start'], s['end']) for s in speech_timestamps]
+
+            return segments
+
+        except Exception as e:
+            print(f"[VAD] Silero检测失败，使用能量VAD: {e}")
+
+    return _energy_based_vad(audio_data, sample_rate, min_speech_duration, min_silence_duration)
+
+
+def _energy_based_vad(audio_data, sample_rate, min_speech_duration=0.3, min_silence_duration=0.5):
     try:
-        from silero_vad import get_speech_timestamps
-        import torch
-        
-        if sample_rate not in [8000, 16000]:
-            import librosa
-            audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
-            sample_rate = 16000
-        
-        if audio_data.dtype != np.float32:
-            audio_data = audio_data.astype(np.float32)
-        
-        max_val = np.max(np.abs(audio_data))
-        if max_val > 1.0 and max_val > 0:
-            audio_data = audio_data / max_val
-        
-        torch.set_num_threads(1)
-        audio_tensor = torch.from_numpy(audio_data)
-        
-        speech_timestamps = get_speech_timestamps(
-            audio_tensor,
-            vad_model,
-            threshold=threshold,
-            min_silence_duration_ms=int(min_silence_duration * 1000),
-            min_speech_duration_ms=int(min_speech_duration * 1000),
-            return_seconds=True
-        )
-        
-        segments = [(s['start'], s['end']) for s in speech_timestamps]
-        
-        return segments
-    
+        import librosa
+
+        frame_length = int(sample_rate * 0.03)
+        hop_length = int(sample_rate * 0.01)
+
+        rms = librosa.feature.rms(y=audio_data, frame_length=frame_length, hop_length=hop_length)[0]
+        rms_db = librosa.amplitude_to_db(rms, ref=1.0)
+
+        noise_db = np.percentile(rms_db, 20)
+        voice_db = np.percentile(rms_db, 80)
+
+        threshold_db = noise_db + (voice_db - noise_db) * 0.3
+
+        if voice_db - noise_db < 3:
+            print(f"[VAD-Energy] 信号动态范围太小 ({voice_db - noise_db:.1f}dB), 返回全部音频")
+            return [(0.0, len(audio_data) / sample_rate)]
+
+        is_voice = rms_db > threshold_db
+
+        segments = []
+        in_voice = False
+        start_sample = 0
+
+        for i, v in enumerate(is_voice):
+            if v and not in_voice:
+                in_voice = True
+                start_sample = i
+            elif not v and in_voice:
+                in_voice = False
+                start_time = start_sample * hop_length / sample_rate
+                end_time = i * hop_length / sample_rate
+                if end_time - start_time >= min_speech_duration:
+                    segments.append((start_time, end_time))
+
+        if in_voice:
+            start_time = start_sample * hop_length / sample_rate
+            end_time = len(is_voice) * hop_length / sample_rate
+            if end_time - start_time >= min_speech_duration:
+                segments.append((start_time, end_time))
+
+        merged = []
+        for seg in segments:
+            if merged and seg[0] - merged[-1][1] < min_silence_duration:
+                merged[-1] = (merged[-1][0], seg[1])
+            else:
+                merged.append(seg)
+
+        print(f"[VAD-Energy] 阈值={threshold_db:.1f}dB, 噪声={noise_db:.1f}dB, 语音={voice_db:.1f}dB, "
+              f"检测到{len(merged)}个语音段")
+
+        if not merged:
+            return [(0.0, len(audio_data) / sample_rate)]
+
+        return merged
+
     except Exception as e:
-        print(f"[VAD] 检测失败: {e}")
+        print(f"[VAD-Energy] 能量VAD失败: {e}")
         return [(0.0, len(audio_data) / sample_rate)]
 
 

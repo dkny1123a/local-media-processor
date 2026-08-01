@@ -116,28 +116,45 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
         if scene == 'cycling' or scene == 'cycling_bluetooth':
             from .cycling_audio_processor import apply_bandpass_filter, apply_voice_enhancement
             from .cycling_audio_processor import apply_dynamic_range_compression, apply_intelligibility_boost
-            from .cycling_audio_processor import apply_vad_gate, apply_preemphasis
-            
-            audio_chunk = apply_preemphasis(audio_chunk)
+            from .vad import detect_voice_segments
+
             audio_chunk = apply_bandpass_filter(audio_chunk, sample_rate)
             audio_chunk = apply_voice_enhancement(audio_chunk, sample_rate)
             audio_chunk = apply_dynamic_range_compression(audio_chunk, sample_rate)
             audio_chunk = apply_intelligibility_boost(audio_chunk, sample_rate)
-            
+
+            # 软限制器：只压缩超过阈值的信号，不影响安静部分
+            soft_threshold = 0.9
+            abs_audio = np.abs(audio_chunk)
+            over = abs_audio > soft_threshold
+            if np.any(over):
+                audio_chunk[over] = np.sign(audio_chunk[over]) * (
+                    soft_threshold + (abs_audio[over] - soft_threshold) * 0.2
+                )
+
+            # 硬限制器作为最终保障
+            max_val = np.max(np.abs(audio_chunk))
+            if max_val > 0.99:
+                audio_chunk = audio_chunk * 0.99 / max_val
+
             pre_vad_duration = len(audio_chunk) / sample_rate
-            audio_chunk, voice_segments = apply_vad_gate(audio_chunk, sample_rate, voice_gain_db=8.0, noise_attenuation_db=-6.0)
-            
+            voice_segments = detect_voice_segments(
+                audio_chunk, sample_rate,
+                min_speech_duration=0.2,
+                min_silence_duration=0.3,
+            )
+
             total_duration = len(audio_chunk) / sample_rate
             non_voice_segments = []
             last_end = 0.0
             vad_removed_duration = 0.0
-            
+
             if voice_segments:
                 voice_total_duration = sum(end - start for start, end in voice_segments)
                 voice_ratio = voice_total_duration / pre_vad_duration if pre_vad_duration > 0 else 0
-                
+
                 print(f"[VAD] 语音占比: {voice_ratio*100:.1f}%, 检测到{len(voice_segments)}个语音段, 语音时长={voice_total_duration:.1f}s")
-                
+
                 if voice_ratio < 0.05:
                     print(f"[VAD] 警告: 语音占比仅{voice_ratio*100:.1f}%, 跳过VAD移除")
                     non_voice_segments = []
@@ -149,7 +166,7 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                                 non_voice_segments.append((last_end, start))
                                 vad_removed_duration += non_voice_duration
                         last_end = end
-                    
+
                     if last_end < total_duration - 0.01:
                         non_voice_duration = total_duration - last_end
                         if non_voice_duration >= max(chunk_min_silence_duration, 1.0):
@@ -157,44 +174,44 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                             vad_removed_duration += non_voice_duration
             else:
                 print(f"[VAD] 未检测到语音段")
-            
+
             non_voice_count = len(non_voice_segments)
-            
+
             if non_voice_count > 0:
                 print(f"[VAD] 移除{non_voice_count}个无人声段, 总时长={vad_removed_duration:.1f}s")
-                
+
                 soft_boundary_ms = 50
                 soft_boundary_samples = int(sample_rate * soft_boundary_ms / 1000)
                 fade_in = np.linspace(0, 1, soft_boundary_samples)
                 fade_out = np.linspace(1, 0, soft_boundary_samples)
-                
+
                 voice_segments_to_keep = []
                 last_end = 0
-                
+
                 for start, end in sorted(non_voice_segments):
                     if start > last_end:
                         voice_segments_to_keep.append((last_end, start))
                     last_end = end
-                
+
                 if last_end < len(audio_chunk) / sample_rate:
                     voice_segments_to_keep.append((last_end, len(audio_chunk) / sample_rate))
-                
+
                 if voice_segments_to_keep:
                     result_segments = []
                     for start, end in voice_segments_to_keep:
                         start_sample = int(start * sample_rate)
                         end_sample = int(end * sample_rate)
-                        
-                        segment = audio_chunk[start_sample:end_sample]
-                        
+
+                        segment = audio_chunk[start_sample:end_sample].copy()
+
                         if len(segment) > soft_boundary_samples * 2:
                             segment[:soft_boundary_samples] = segment[:soft_boundary_samples] * fade_in
                             segment[-soft_boundary_samples:] = segment[-soft_boundary_samples:] * fade_out
-                        
+
                         result_segments.append(segment)
-                    
+
                     audio_chunk = np.concatenate(result_segments)
-            
+
             post_vad_duration = len(audio_chunk) / sample_rate
             print(f"[VAD] 处理前={pre_vad_duration:.1f}s, 处理后={post_vad_duration:.1f}s, VAD移除={vad_removed_duration:.1f}s")
         elif chunk_highpass_cutoff > 0:
@@ -238,10 +255,6 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
         post_silence_duration = len(audio_chunk) / sample_rate
         if silence_removed_duration > 0:
             print(f"[Silence] 处理前={pre_silence_duration:.1f}s, 处理后={post_silence_duration:.1f}s, 移除={silence_removed_duration:.1f}s")
-
-        if scene == 'cycling' or scene == 'cycling_bluetooth':
-            from .cycling_audio_processor import apply_deemphasis
-            audio_chunk = apply_deemphasis(audio_chunk)
 
         return audio_chunk, silence_count, non_voice_count
     except Exception:
