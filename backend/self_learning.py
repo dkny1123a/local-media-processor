@@ -146,43 +146,90 @@ def analyze_audio_features(audio_data: np.ndarray, sample_rate: int, sample_dura
 
 def learn_optimal_parameters(features: Dict, scene: str) -> Dict:
     history = load_history()
-    
+
     similar = find_similar_records(features, history, top_n=3)
-    
+
     if not similar:
         print("[SelfLearning] 无历史记录，使用默认参数")
         return {}
-    
+
     print(f"[SelfLearning] 找到{len(similar)}个相似文件，正在学习最优参数...")
-    
+
+    # ============================================================
+    # 评分逻辑：奖励"保留有效音频 + 适度移除明显静音"
+    # ============================================================
+    # 原逻辑缺陷：`if silence_removed > 0.1: score += silence_removed * 0.3`
+    # 该公式奖励移除更多静音，导致系统偏好激进阈值（学到 -25.4dB 异常值）
+    #
+    # 新评分原则：
+    #   1. 主权重保留率（kept_ratio）：保留 70%以上才高分，越高越好
+    #   2. 静音移除率仅在 5%-25% 区间加分（避免过少=没效果，过多=过度移除）
+    #   3. 移除率 >40% 直接判负分（防止过激参数被学习）
+    # ============================================================
     best_params = {}
     best_score = float('-inf')
-    
+
     for record in similar:
         params = record.parameters
         result = record.result
-        
+
         kept_ratio = result.get('kept_ratio', 0)
         silence_removed = result.get('silence_removed_ratio', 0)
-        noise_level = features.get('noise_level', 'medium')
-        
+
         score = 0.0
-        if kept_ratio > 0.7:
-            score += kept_ratio * 0.5
-        if silence_removed > 0.1:
-            score += silence_removed * 0.3
-        if noise_level == 'high':
-            score += params.get('noise_reduction', 0) * 0.2
-        
+        # 主权重：保留率（越高越好，但需 >0.7 才认为合理）
+        if kept_ratio >= 0.7:
+            score += kept_ratio * 0.6
+        elif kept_ratio >= 0.5:
+            score += kept_ratio * 0.3
+        else:
+            # 保留率 <50% 视为过激移除，扣分
+            score -= 0.5
+
+        # 辅助权重：静音移除率在合理区间才加分
+        if 0.05 <= silence_removed <= 0.25:
+            score += 0.2
+        elif silence_removed > 0.40:
+            # 过度移除（>40%）扣分
+            score -= 0.3
+
         if score > best_score:
             best_score = score
             best_params = params.copy()
-    
-    if best_params:
-        print(f"[SelfLearning] 学习到最优参数: {best_params}")
-        return best_params
-    
-    return {}
+
+    if not best_params:
+        return {}
+
+    # ============================================================
+    # 参数合理性校验：过滤异常学到的 silence_threshold
+    # ============================================================
+    # 之前学到 -25.4dB 是因为评分错误。即便评分修正，仍需校验：
+    #   silence_threshold 必须接近"人耳不可辨识阈值"
+    #   即 noise_floor + [1dB, 12dB] 范围内（噪声掩盖到稍微宽松）
+    #
+    # 超出此范围视为异常值，丢弃 silence_threshold 字段
+    # 但保留其他字段（noise_reduction、highpass_cutoff 等）
+    # ============================================================
+    noise_floor_db = features.get('noise_floor_db', -60.0)
+    learned_threshold = best_params.get('silence_threshold')
+
+    if learned_threshold is not None:
+        min_reasonable = noise_floor_db + 1.0   # 至少高于噪声底噪 1dB
+        max_reasonable = noise_floor_db + 12.0  # 不超过噪声底噪 + 12dB（人耳不可辨识范围上限）
+
+        if not (min_reasonable <= learned_threshold <= max_reasonable):
+            print(f"[SelfLearning] 学到的 silence_threshold={learned_threshold:.1f}dB 超出合理范围 "
+                  f"[{min_reasonable:.1f}dB, {max_reasonable:.1f}dB]（noise_floor={noise_floor_db:.1f}dB），"
+                  f"丢弃该字段，使用自适应计算值")
+            best_params.pop('silence_threshold', None)
+        else:
+            print(f"[SelfLearning] 学到的 silence_threshold={learned_threshold:.1f}dB 在合理范围内，采用")
+
+    # min_silence_duration 不再从历史学习——固定 1.5s 与基准线匹配
+    best_params.pop('min_silence_duration', None)
+
+    print(f"[SelfLearning] 学习到最优参数: {best_params}")
+    return best_params
 
 
 def record_processing(file_path: str, features: Dict, parameters: Dict, result: Dict):

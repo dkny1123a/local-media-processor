@@ -138,101 +138,84 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                 audio_chunk = audio_chunk * 0.99 / max_val
 
             pre_vad_duration = len(audio_chunk) / sample_rate
+
+            # ============================================================
+            # VAD 路径：仅用于语音占比统计，不再移除"无人声段"
+            # ============================================================
+            # 原 VAD 移除逻辑会把"无人声段"（环境音、风声、车轮声等）当作静音移除，
+            # 但这些是用户想保留的有效音频。无人声 ≠ 静音。
+            #
+            # 现在静音移除统一由 silence_detector 负责：
+            #   - 基于"人耳不可辨识"原理（信号被噪声掩盖，即 < noise_floor + 3dB）
+            #   - 而不是基于"是否为语音"
+            #
+            # VAD 仍调用，仅打印统计信息用于诊断
+            # ============================================================
             voice_segments = detect_voice_segments(
                 audio_chunk, sample_rate,
                 min_speech_duration=0.2,
-                min_silence_duration=0.3,
+                min_silence_duration=1.5,
             )
 
-            total_duration = len(audio_chunk) / sample_rate
-            non_voice_segments = []
-            last_end = 0.0
+            non_voice_count = 0
             vad_removed_duration = 0.0
 
             if voice_segments:
                 voice_total_duration = sum(end - start for start, end in voice_segments)
                 voice_ratio = voice_total_duration / pre_vad_duration if pre_vad_duration > 0 else 0
-
-                print(f"[VAD] 语音占比: {voice_ratio*100:.1f}%, 检测到{len(voice_segments)}个语音段, 语音时长={voice_total_duration:.1f}s")
-
-                if voice_ratio < 0.05:
-                    print(f"[VAD] 警告: 语音占比仅{voice_ratio*100:.1f}%, 跳过VAD移除")
-                    non_voice_segments = []
-                else:
-                    for start, end in sorted(voice_segments):
-                        if start > last_end + 0.01:
-                            non_voice_duration = start - last_end
-                            if non_voice_duration >= max(chunk_min_silence_duration, 1.0):
-                                non_voice_segments.append((last_end, start))
-                                vad_removed_duration += non_voice_duration
-                        last_end = end
-
-                    if last_end < total_duration - 0.01:
-                        non_voice_duration = total_duration - last_end
-                        if non_voice_duration >= max(chunk_min_silence_duration, 1.0):
-                            non_voice_segments.append((last_end, total_duration))
-                            vad_removed_duration += non_voice_duration
+                print(f"[VAD-Stat] 语音占比: {voice_ratio*100:.1f}%, 检测到{len(voice_segments)}个语音段, "
+                      f"语音时长={voice_total_duration:.1f}s（仅统计，不移除）")
             else:
-                print(f"[VAD] 未检测到语音段")
-
-            non_voice_count = len(non_voice_segments)
-
-            if non_voice_count > 0:
-                print(f"[VAD] 移除{non_voice_count}个无人声段, 总时长={vad_removed_duration:.1f}s")
-
-                soft_boundary_ms = 50
-                soft_boundary_samples = int(sample_rate * soft_boundary_ms / 1000)
-                fade_in = np.linspace(0, 1, soft_boundary_samples)
-                fade_out = np.linspace(1, 0, soft_boundary_samples)
-
-                voice_segments_to_keep = []
-                last_end = 0
-
-                for start, end in sorted(non_voice_segments):
-                    if start > last_end:
-                        voice_segments_to_keep.append((last_end, start))
-                    last_end = end
-
-                if last_end < len(audio_chunk) / sample_rate:
-                    voice_segments_to_keep.append((last_end, len(audio_chunk) / sample_rate))
-
-                if voice_segments_to_keep:
-                    result_segments = []
-                    for start, end in voice_segments_to_keep:
-                        start_sample = int(start * sample_rate)
-                        end_sample = int(end * sample_rate)
-
-                        segment = audio_chunk[start_sample:end_sample].copy()
-
-                        if len(segment) > soft_boundary_samples * 2:
-                            segment[:soft_boundary_samples] = segment[:soft_boundary_samples] * fade_in
-                            segment[-soft_boundary_samples:] = segment[-soft_boundary_samples:] * fade_out
-
-                        result_segments.append(segment)
-
-                    audio_chunk = np.concatenate(result_segments)
-
-            post_vad_duration = len(audio_chunk) / sample_rate
-            print(f"[VAD] 处理前={pre_vad_duration:.1f}s, 处理后={post_vad_duration:.1f}s, VAD移除={vad_removed_duration:.1f}s")
+                print(f"[VAD-Stat] 未检测到语音段（仅统计，不移除）")
         elif chunk_highpass_cutoff > 0:
             audio_chunk = apply_highpass_filter(audio_chunk, sample_rate, chunk_highpass_cutoff)
 
+        # ============================================================
+        # Per-chunk noise floor re-analysis (on PROCESSED audio)
+        # ============================================================
+        # 关键修复：噪声底噪必须在处理后的音频上重新计算
+        # 因为带通滤波、动态压缩、语音增强等处理会改变音频的能量分布
+        # 用原始音频的 noise_floor 去判断处理后的音频 = 阈值完全不匹配
+        #
+        # 原理：人耳不可辨识 = 信号能量 ≤ 噪声底噪 + 3dB
+        # 3dB 是声学 simultaneous masking（同时掩蔽）的临界值
+        # 低于此阈值的声音被环境噪声完全掩盖，人类听觉系统无法感知
+        #
+        # 阈值范围约束：noise_floor + [1dB, 10dB]
+        #   - 下限 1dB：避免与噪声底噪重合（完全无意义）
+        #   - 上限 10dB：避免把可辨识的低音量语音误判为不可辨识
+        #   - 不再依赖 signal_peak（之前的 signal_peak - 15dB 边界在
+        #     signal_peak 接近 noise_floor 时把阈值压到 noise_floor + 1dB，
+        #     导致永远检测不到任何不可辨识片段）
+        # ============================================================
+        try:
+            import librosa
+            frame_len = int(sample_rate * 0.05)
+            hop_len = int(sample_rate * 0.025)
+            rms_frames = librosa.feature.rms(y=audio_chunk, frame_length=frame_len, hop_length=hop_len)[0]
+            rms_db_frames = librosa.amplitude_to_db(rms_frames, ref=1.0)
+            chunk_noise_floor_db = float(np.percentile(rms_db_frames, 5))
+            # 基于处理后音频的噪声底噪计算"人耳不可辨识"阈值
+            # 核心公式：noise_floor + 3dB（同时掩蔽临界值）
+            chunk_silence_threshold = chunk_noise_floor_db + 3.0
+            # 范围约束：[noise_floor + 1dB, noise_floor + 10dB]
+            chunk_silence_threshold = min(chunk_silence_threshold, chunk_noise_floor_db + 10.0)
+            chunk_silence_threshold = max(chunk_silence_threshold, chunk_noise_floor_db + 1.0)
+            pct_below = float(np.mean(rms_db_frames < chunk_silence_threshold))
+            print(f"[PerChunk] 处理后噪声底噪={chunk_noise_floor_db:.1f}dB, "
+                  f"不可辨识阈值={chunk_silence_threshold:.1f}dB (noise_floor+{chunk_silence_threshold - chunk_noise_floor_db:.1f}dB), "
+                  f"低于阈值帧占比={pct_below*100:.1f}%")
+        except Exception:
+            pass
+
         pre_silence_duration = len(audio_chunk) / sample_rate
-        
-        if scene not in ['cycling', 'cycling_bluetooth']:
-            silence_segments = detect_silence(
-                audio_chunk,
-                sample_rate,
-                threshold_dbfs=chunk_silence_threshold,
-                min_silence_duration=chunk_min_silence_duration,
-            )
-        else:
-            silence_segments = detect_silence(
-                audio_chunk,
-                sample_rate,
-                threshold_dbfs=-35.0,
-                min_silence_duration=5.0,
-            )
+
+        silence_segments = detect_silence(
+            audio_chunk,
+            sample_rate,
+            threshold_dbfs=chunk_silence_threshold,
+            min_silence_duration=chunk_min_silence_duration,
+        )
 
         silence_count = len(silence_segments)
         silence_removed_duration = sum(end - start for start, end in silence_segments)
@@ -244,17 +227,18 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
             hop_length = int(sample_rate * 0.01)
             rms = librosa.feature.rms(y=audio_chunk, frame_length=frame_length, hop_length=hop_length)
             db = librosa.amplitude_to_db(rms, ref=1.0)
-            threshold = chunk_silence_threshold if scene not in ['cycling', 'cycling_bluetooth'] else -40.0
+            threshold = chunk_silence_threshold
             silence_ratio = float(np.mean(db < threshold))
             if silence_ratio > 0.1:
-                print(f"[Silence] dB范围: [{np.min(db):.1f}, {np.max(db):.1f}], 阈值={threshold}, 静音比例={silence_ratio*100:.1f}%, 检测到{silence_count}个静音段, 移除时长={silence_removed_duration:.1f}s")
+                print(f"[Silence] dB范围: [{np.min(db):.1f}, {np.max(db):.1f}], 不可辨识阈值={threshold}, "
+                      f"低于阈值比例={silence_ratio*100:.1f}%, 检测到{silence_count}段不可辨识音频, 移除时长={silence_removed_duration:.1f}s")
 
         if silence_segments:
             audio_chunk = remove_silence(audio_chunk, sample_rate, silence_segments)
         
         post_silence_duration = len(audio_chunk) / sample_rate
         if silence_removed_duration > 0:
-            print(f"[Silence] 处理前={pre_silence_duration:.1f}s, 处理后={post_silence_duration:.1f}s, 移除={silence_removed_duration:.1f}s")
+            print(f"[Silence] 处理前={pre_silence_duration:.1f}s, 处理后={post_silence_duration:.1f}s, 移除不可辨识={silence_removed_duration:.1f}s")
 
         return audio_chunk, silence_count, non_voice_count
     except Exception:
@@ -272,21 +256,36 @@ def _chunk_worker(args):
         f.write(f"{silence_count},{non_voice_count}")
 
 
-def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction, 
-                               silence_threshold, min_silence_duration, sample_rate, result_path, 
+def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction,
+                               silence_threshold, min_silence_duration, sample_rate, result_path,
                                scene='default', adaptive_chunk=False):
-    args = (i, audio_chunk, highpass_cutoff, noise_reduction, silence_threshold, 
+    # 检测当前进程是否为 daemonic（典型场景：Celery worker）
+    # daemonic 进程不允许创建子进程，会报 "daemonic processes are not allowed to have children"
+    # 此时跳过 multiprocessing 超时机制，直接同步处理（Celery 本身有 task_time_limit 兜底）
+    if mp.current_process().daemon:
+        try:
+            result, silence_count, non_voice_count = process_single_chunk(
+                audio_chunk, highpass_cutoff, noise_reduction,
+                silence_threshold, min_silence_duration, sample_rate,
+                scene=scene, adaptive_chunk=adaptive_chunk
+            )
+            return True, result, silence_count, non_voice_count
+        except Exception as e:
+            print(f"[Chunk {i}] 同步处理失败: {e}")
+            return False, audio_chunk, 0, 0
+
+    args = (i, audio_chunk, highpass_cutoff, noise_reduction, silence_threshold,
             min_silence_duration, sample_rate, result_path, scene, adaptive_chunk)
-    
+
     p = mp.Process(target=_chunk_worker, args=(args,))
     p.start()
     p.join(timeout=120)
-    
+
     if p.is_alive():
         p.terminate()
         p.join()
         return False, audio_chunk, 0, 0
-    
+
     silence_count = 0
     non_voice_count = 0
     silence_path = result_path + '_silence'
@@ -301,7 +300,7 @@ def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction,
             os.unlink(silence_path)
         except:
             pass
-    
+
     if os.path.exists(result_path):
         try:
             result = np.load(result_path)
@@ -310,7 +309,7 @@ def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction,
         except:
             os.unlink(result_path)
             return False, audio_chunk, 0, 0
-    
+
     return False, audio_chunk, 0, 0
 
 

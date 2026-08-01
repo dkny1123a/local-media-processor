@@ -19,25 +19,33 @@ def init_frcrn(model_dir=None):
     try:
         from modelscope.pipelines import pipeline
         from modelscope.utils.constant import Tasks
-        
+
         if model_dir:
             os.environ['MODELSCOPE_CACHE'] = model_dir
-        
+
+        # 优先尝试 ONNX 模式（更快），失败时回退到 PyTorch 模式
+        # 注意：不仅捕获 ImportError，还要捕获 ONNX 模式加载本身可能抛出的其他异常
+        onnx_failed_reason = None
         try:
-            import onnxruntime
+            import onnxruntime  # noqa: F401
             _frcrn_pipeline = pipeline(
                 Tasks.acoustic_noise_suppression,
                 model='damo/speech_frcrn_ans_cirm_16k',
                 device='cpu',
             )
             print("[FRCRN] 模型加载成功 (ONNX)")
+            return True
         except ImportError:
-            _frcrn_pipeline = pipeline(
-                Tasks.acoustic_noise_suppression,
-                model='damo/speech_frcrn_ans_cirm_16k',
-            )
-            print("[FRCRN] 模型加载成功 (PyTorch)")
-        
+            onnx_failed_reason = 'onnxruntime 未安装'
+        except Exception as e:
+            onnx_failed_reason = f'ONNX 加载失败: {e}'
+
+        # 回退到 PyTorch 模式
+        _frcrn_pipeline = pipeline(
+            Tasks.acoustic_noise_suppression,
+            model='damo/speech_frcrn_ans_cirm_16k',
+        )
+        print(f"[FRCRN] 模型加载成功 (PyTorch, ONNX 跳过原因: {onnx_failed_reason})")
         return True
     except Exception as e:
         print(f"[FRCRN] 模型加载失败: {e}")
@@ -59,37 +67,48 @@ def analyze_noise_profile(audio_data: np.ndarray, sample_rate: int) -> dict:
 
 def frcrn_denoise_chunk(audio_data: np.ndarray, sample_rate: int) -> np.ndarray:
     pipeline = get_frcrn_pipeline()
-    
+
     if pipeline is None:
         return audio_data
-    
+
+    temp_input_path = None
+    temp_output_path = None
     try:
         if sample_rate != 16000:
             audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
             sample_rate = 16000
-        
+
         temp_input = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
         temp_input_path = temp_input.name
         temp_input.close()
-        
+
         sf.write(temp_input_path, audio_data, sample_rate, subtype='PCM_16')
-        
+
         temp_output = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
         temp_output_path = temp_output.name
         temp_output.close()
-        
+
         pipeline(temp_input_path, output_path=temp_output_path)
-        
+
         denoised_audio, _ = librosa.load(temp_output_path, sr=sample_rate, mono=True)
-        
-        os.unlink(temp_input_path)
-        os.unlink(temp_output_path)
-        
+
         return denoised_audio
-    
+
     except Exception as e:
         print(f"[FRCRN] 降噪失败: {e}")
         return audio_data
+    finally:
+        # 确保临时文件在所有路径下都被清理（包括异常）
+        if temp_input_path and os.path.exists(temp_input_path):
+            try:
+                os.unlink(temp_input_path)
+            except OSError:
+                pass
+        if temp_output_path and os.path.exists(temp_output_path):
+            try:
+                os.unlink(temp_output_path)
+            except OSError:
+                pass
 
 
 def adaptive_denoise(audio_data: np.ndarray, sample_rate: int) -> np.ndarray:

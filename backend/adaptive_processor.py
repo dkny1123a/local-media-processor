@@ -116,19 +116,23 @@ def calculate_adaptive_parameters(
     silence_ratio_40db = analysis['silence_ratio_40db']
     avg_quiet_frame_db = analysis['avg_quiet_frame_db']
     avg_loud_frame_db = analysis['avg_loud_frame_db']
-    
-    if dynamic_range < 5:
-        silence_threshold_db = noise_floor_db + 3
-    elif dynamic_range < 15:
-        silence_threshold_db = noise_floor_db + (signal_peak_db - noise_floor_db) * 0.25
-    elif dynamic_range < 25:
-        silence_threshold_db = noise_floor_db + (signal_peak_db - noise_floor_db) * 0.30
-    else:
-        silence_threshold_db = noise_floor_db + (signal_peak_db - noise_floor_db) * 0.35
-    
-    silence_threshold_db = max(silence_threshold_db, noise_floor_db + 2)
-    silence_threshold_db = min(silence_threshold_db, signal_peak_db - 5)
-    
+
+    # ============================================================
+    # 自适应静音阈值：基于"人耳不可辨识"原理
+    # ============================================================
+    # 人耳不可辨识判定：信号被环境噪声完全掩盖
+    #   - 信号能量 ≤ noise_floor + 3dB 时，被噪声掩盖听不到
+    #   - 阈值跟随音频自身噪声底噪变化，不硬编码绝对值
+    #
+    # 核心公式：noise_floor + 3dB（同时掩蔽临界值）
+    # 范围约束：[noise_floor + 1dB, noise_floor + 10dB]
+    #   - 不再依赖 signal_peak（当 signal_peak 接近 noise_floor 时
+    #     旧的 signal_peak - 15dB 边界会把阈值压到过低水平）
+    # ============================================================
+    silence_threshold_db = noise_floor_db + 3.0
+    silence_threshold_db = min(silence_threshold_db, noise_floor_db + 10.0)
+    silence_threshold_db = max(silence_threshold_db, noise_floor_db + 1.0)
+
     if signal_to_noise_ratio < 5:
         noise_reduction = 0.95
     elif signal_to_noise_ratio < 10:
@@ -141,33 +145,28 @@ def calculate_adaptive_parameters(
         noise_reduction = 0.60 + (signal_to_noise_ratio - 30) * (-0.005)
     else:
         noise_reduction = 0.45
-    
+
     noise_reduction = max(0.55, min(0.98, noise_reduction))
-    
+
     if rms_coefficient_of_variation < 0.03 and dynamic_range < 5:
         noise_reduction = max(0.05, noise_reduction * 0.3)
-    
-    if silence_ratio_50db > 0.8:
-        min_silence_duration = 0.25
-    elif silence_ratio_50db > 0.6:
-        min_silence_duration = 0.30
-    elif silence_ratio_45db > 0.5:
-        min_silence_duration = 0.35
-    elif silence_ratio_40db > 0.4:
-        min_silence_duration = 0.40
-    else:
-        min_silence_duration = 0.50
-    
-    if dynamic_range < 10:
-        min_silence_duration = max(min_silence_duration, 0.4)
-    
+
+    # 最小静音时长：固定 1.5s（与基准线匹配）
+    # 不再根据 silence_ratio 动态调整——之前的 0.25s/0.30s/0.35s 都过于激进，
+    # 会把语句间停顿也移除，破坏语音连贯性
+    min_silence_duration = 1.5
+
     target_db = -3.0
-    
+
     has_low_freq_noise = noise_floor_db > -65
     highpass_cutoff = 150.0 if has_low_freq_noise else 0.0
-    
+
     stationary_noise = signal_to_noise_ratio < 25 and rms_coefficient_of_variation < 0.2
-    
+
+    print(f"[Adaptive] noise_floor={noise_floor_db:.1f}dB, signal_peak={signal_peak_db:.1f}dB, "
+          f"dynamic_range={dynamic_range:.1f}dB → silence_threshold={silence_threshold_db:.1f}dB "
+          f"(noise_floor+{silence_threshold_db - noise_floor_db:.1f}dB), min_silence={min_silence_duration}s")
+
     return {
         'noise_reduction': round(noise_reduction, 2),
         'silence_threshold': round(silence_threshold_db, 1),

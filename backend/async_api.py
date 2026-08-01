@@ -45,18 +45,26 @@ async def async_process_media(
     file: UploadFile = File(...),
     silence_threshold: float = Form(-40.0),
     min_silence_duration: float = Form(0.5),
-    max_volume: bool = Form(True)
+    max_volume: bool = Form(True),
+    scene: str = Form('default'),
+    noise_reduction: float = Form(0.0),
+    stationary_noise: bool = Form(False),
+    auto_detect: bool = Form(True)
 ):
     """
     异步媒体处理端点 - 统一入口
     根据文件类型自动路由到音频或视频处理
-    
+
     Args:
         file: 上传的媒体文件（音频或视频）
         silence_threshold: 静音阈值 (dB)
         min_silence_duration: 最小静音时长 (秒)
         max_volume: 是否最大化音量
-    
+        scene: 场景（cycling/bluetooth/default 等）
+        noise_reduction: 降噪强度
+        stationary_noise: 是否使用稳态噪声处理
+        auto_detect: 是否自适应分析
+
     Returns:
         任务ID和状态信息
     """
@@ -78,8 +86,8 @@ async def async_process_media(
     base_name = os.path.splitext(file.filename)[0]
     
     if file_type == 'audio':
-        ext = os.path.splitext(file.filename)[1]
-        output_filename = f"{base_name}_processed{ext}"
+        # 统一输出 .mp3 后缀（与基准线格式一致）
+        output_filename = f"{base_name}_processed.mp3"
         output_path = os.path.join(output_dir, output_filename)
         
         task = process_media_task.delay(
@@ -89,12 +97,16 @@ async def async_process_media(
                 "file_type": "audio",
                 "silence_threshold": silence_threshold,
                 "min_silence_duration": min_silence_duration,
-                "max_volume": max_volume
+                "max_volume": max_volume,
+                "scene": scene,
+                "noise_reduction": noise_reduction,
+                "stationary_noise": stationary_noise,
+                "auto_detect": auto_detect
             }
         )
-        
+
         record_processing_request('audio', 'process', 'submitted')
-        
+
         return {
             "task_id": task.id,
             "status": "PENDING",
@@ -105,7 +117,11 @@ async def async_process_media(
             "options": {
                 "silence_threshold": silence_threshold,
                 "min_silence_duration": min_silence_duration,
-                "max_volume": max_volume
+                "max_volume": max_volume,
+                "scene": scene,
+                "noise_reduction": noise_reduction,
+                "stationary_noise": stationary_noise,
+                "auto_detect": auto_detect
             }
         }
     else:
@@ -222,18 +238,26 @@ async def batch_process_audio(
     files: list[UploadFile] = File(...),
     silence_threshold: float = Form(-40.0),
     min_silence_duration: float = Form(0.5),
-    max_volume: bool = Form(True)
+    max_volume: bool = Form(True),
+    scene: str = Form('default'),
+    noise_reduction: float = Form(0.0),
+    stationary_noise: bool = Form(False),
+    auto_detect: bool = Form(True)
 ):
     """
     批量音频处理端点
     同时处理多个音频文件
-    
+
     Args:
         files: 上传的音频文件列表
         silence_threshold: 静音阈值 (dB)
         min_silence_duration: 最小静音时长 (秒)
         max_volume: 是否最大化音量
-    
+        scene: 场景（cycling/bluetooth/default 等）
+        noise_reduction: 降噪强度
+        stationary_noise: 是否使用稳态噪声处理
+        auto_detect: 是否自适应分析
+
     Returns:
         任务ID列表
     """
@@ -253,7 +277,9 @@ async def batch_process_audio(
             buffer.write(content)
         
         output_dir = os.environ.get('OUTPUT_DIR', '/app/output')
-        output_filename = f"processed_{task_id}_{file.filename}"
+        # 统一输出 .mp3 后缀（与基准线格式一致）
+        base_file_name = os.path.splitext(file.filename)[0]
+        output_filename = f"processed_{task_id}_{base_file_name}.mp3"
         output_path = os.path.join(output_dir, output_filename)
         
         task = process_audio_task.delay(
@@ -262,7 +288,11 @@ async def batch_process_audio(
             {
                 "silence_threshold": silence_threshold,
                 "min_silence_duration": min_silence_duration,
-                "max_volume": max_volume
+                "max_volume": max_volume,
+                "scene": scene,
+                "noise_reduction": noise_reduction,
+                "stationary_noise": stationary_noise,
+                "auto_detect": auto_detect
             }
         )
         

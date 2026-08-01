@@ -188,315 +188,35 @@ def process_audio_background(
     auto_detect, noise_reduction, silence_threshold, min_silence_duration,
     max_volume, stationary_noise, scene
 ):
-    import librosa
-    import numpy as np
-    import tempfile
-    import subprocess
-    import gc
+    """同步线程路径包装器：调用 audio_pipeline 并把进度/结果写入 main.py 的全局状态"""
+    from .audio_pipeline import run_audio_pipeline
 
     print(f"[Task {task_id}] 开始后台处理: {original_filename}")
-    
-    try:
-        print(f"[Task {task_id}] 转换格式: {input_path}")
-        update_progress(task_id, 'converting', '正在转换音频格式...', 10)
-        converted_path, was_converted = convert_to_wav(input_path)
-        
-        print(f"[Task {task_id}] 获取音频信息")
-        update_progress(task_id, 'loading', '正在获取音频信息...', 15)
-        
-        try:
-            total_duration = librosa.get_duration(path=converted_path)
-            sr_result = librosa.get_samplerate(converted_path)
-        except:
-            total_duration = 300
-            sr_result = 44100
-        
-        sample_rate = sr_result
-        original_duration = total_duration
-        print(f"[Task {task_id}] 音频时长: {original_duration:.2f}秒, 采样率: {sample_rate}")
-        
-        chunk_duration = 60
-        chunk_size = int(sample_rate * chunk_duration)
-        num_chunks = int(np.ceil(total_duration / chunk_duration))
-        
-        update_progress(task_id, 'analyzing', '正在分析音频特征（噪声等级、动态范围）...', 20)
-        
-        chunk_generator, _, total_samples, _ = load_audio_chunks(converted_path, sample_rate, chunk_duration)
-        
-        analysis = None
-        for i, chunk in enumerate(chunk_generator()):
-            if i == 0:
-                analysis = analyze_audio_characteristics(chunk, sample_rate)
-                print(f"[Task {task_id}] 分析完成: noise_floor={analysis['noise_floor_db']:.1f}dB, snr={analysis['signal_to_noise_ratio']:.1f}")
-            break
-        
-        if was_converted and os.path.exists(converted_path):
-            os.unlink(converted_path)
-        
-        adaptive_params = None
-        if auto_detect and analysis:
-            adaptive_params = calculate_adaptive_parameters(analysis, scene)
-            noise_reduction = adaptive_params['noise_reduction']
-            silence_threshold = adaptive_params['silence_threshold']
-            min_silence_duration = adaptive_params['min_silence_duration']
-            target_db = adaptive_params['target_db']
-            highpass_cutoff = adaptive_params['highpass_cutoff']
-            print(f"[Task {task_id}] 自适应参数: nr={noise_reduction}, hp={highpass_cutoff}, st={silence_threshold}")
-        else:
-            highpass_cutoff = 100.0 if scene == 'cycling' else 0.0
-            target_db = -3.0 if scene in ['bluetooth', 'cycling'] else -1.0
-        
-        try:
-            from .self_learning import learn_optimal_parameters, record_processing
-            
-            audio_features = {}
-            if analysis:
-                audio_features = {
-                    'noise_floor_db': analysis['noise_floor_db'],
-                    'signal_peak_db': analysis.get('signal_peak_db', -30.0),
-                    'dynamic_range': analysis.get('dynamic_range', 20.0),
-                    'spectral_flatness': analysis.get('spectral_flatness', 0.5),
-                    'spectral_centroid': analysis.get('spectral_centroid', 1000.0),
-                    'sample_rate': sample_rate,
-                }
-            
-            learned_params = learn_optimal_parameters(audio_features, scene)
-            if learned_params:
-                if 'noise_reduction' in learned_params:
-                    noise_reduction = learned_params['noise_reduction']
-                if 'silence_threshold' in learned_params:
-                    silence_threshold = learned_params['silence_threshold']
-                if 'min_silence_duration' in learned_params:
-                    min_silence_duration = learned_params['min_silence_duration']
-                if 'highpass_cutoff' in learned_params:
-                    highpass_cutoff = learned_params['highpass_cutoff']
-                print(f"[Task {task_id}] 自学习参数覆盖: nr={noise_reduction}, hp={highpass_cutoff}, st={silence_threshold}")
-        except Exception as e:
-            print(f"[Task {task_id}] 自学习跳过: {e}")
-        
-        converted_path_again, was_converted_again = convert_to_wav(input_path)
-        
-        temp_wav_path = None
-        cycling_stats = None
-        
-        update_progress(task_id, 'processing', '骑行+蓝牙场景专用处理...', 25)
-        
-        def progress_callback(pct, msg, status=None):
-            chunk_progress = 25 + int(pct * 0.55)
-            if chunk_progress > 80:
-                chunk_progress = 80
-            update_progress(task_id, 'processing', msg, chunk_progress)
-        
-        try:
-            processed_audio, cycling_stats, temp_wav_path = process_audio_chunks(
-                converted_path_again, sample_rate, chunk_duration,
-                highpass_cutoff, noise_reduction, silence_threshold, min_silence_duration,
-                progress_callback=progress_callback,
-                task_name=f"Task {task_id}",
-                scene='cycling_bluetooth',
-                adaptive_chunk=auto_detect
-            )
-        except Exception as e:
-            print(f"[Task {task_id}] 分块处理失败: {e}")
-            raise
-        
-        update_progress(task_id, 'processing', '蓝牙优化（降采样至44.1kHz）...', 85)
 
-        optimized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-        optimized_wav.close()
-        optimized_path = optimized_wav.name
-        
-        target_sample_rate = 44100
-        if sample_rate > target_sample_rate:
-            command = [
-                'ffmpeg',
-                '-i', temp_wav_path,
-                '-ac', '1',
-                '-ar', str(target_sample_rate),
-                '-y',
-                '-loglevel', 'quiet',
-                optimized_path
-            ]
-            
-            try:
-                subprocess.run(command, check=True, capture_output=True, timeout=300)
-                os.unlink(temp_wav_path)
-                temp_wav_path = optimized_path
-                sample_rate = target_sample_rate
-                print(f"[Task {task_id}] 降采样完成: {sample_rate}Hz")
-            except subprocess.TimeoutExpired:
-                print(f"[Task {task_id}] 降采样超时")
-                os.unlink(optimized_path)
-            except Exception as e:
-                print(f"[Task {task_id}] 降采样失败: {e}")
-                os.unlink(optimized_path)
-        else:
-            print(f"[Task {task_id}] 采样率{sample_rate}Hz无需降采样")
-        
-        if was_converted_again and os.path.exists(converted_path_again):
-            os.unlink(converted_path_again)
-        
-        if max_volume and temp_wav_path:
-            update_progress(task_id, 'processing', '正在调整音量...', 75)
-            normalized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            normalized_wav.close()
-            normalized_path = normalized_wav.name
-            
-            command = [
-                'ffmpeg',
-                '-i', temp_wav_path,
-                '-af', f'loudnorm=I={target_db}:LRA=11:TP=-1.5',
-                '-y',
-                '-loglevel', 'quiet',
-                normalized_path
-            ]
-            
-            try:
-                subprocess.run(command, check=True, capture_output=True, timeout=300)
-                os.unlink(temp_wav_path)
-                temp_wav_path = normalized_path
-            except subprocess.TimeoutExpired:
-                print(f"[Task {task_id}] 音量调整超时")
-                os.unlink(normalized_path)
-            except:
-                os.unlink(normalized_path)
-        
-        silence_segments_removed = cycling_stats.get('silence_segments_removed', 0) if cycling_stats else 0
-        non_voice_segments_removed = cycling_stats.get('non_voice_segments_removed', 0) if cycling_stats else 0
-        
-        adaptive_result = {
-            'success': True,
-            'analysis': analysis,
-            'applied_params': {
-                'noise_reduction': noise_reduction,
-                'silence_threshold': silence_threshold,
-                'min_silence_duration': min_silence_duration,
-                'target_db': target_db,
-                'stationary_noise': stationary_noise,
-                'highpass_cutoff': highpass_cutoff,
-                'auto_detect': auto_detect,
-                'scene': scene
-            },
-            'stats': {
-                'duration': round(len(processed_audio) / sample_rate, 2) if len(processed_audio) > 0 else 0,
-                'sample_rate': sample_rate,
-                'silence_segments_removed': silence_segments_removed,
-                'non_voice_segments_removed': non_voice_segments_removed
-            }
-        }
-        
-        if not adaptive_result['success']:
-            print(f"[Task {task_id}] 自适应处理失败: {adaptive_result['message']}")
-            result = {
-                "success": False,
-                "message": adaptive_result['message'],
-                "file_type": "audio"
-            }
-            save_task_result(task_id, result)
-            clear_progress(task_id)
-            cleanup_uploaded_file(task_id, input_path)
-            return
-        
-        update_progress(task_id, 'encoding', '正在编码为MP3格式...', 90)
-        
-        output_dir = os.path.dirname(output_path)
-        os.makedirs(output_dir, exist_ok=True)
-        
-        if temp_wav_path and os.path.exists(temp_wav_path):
-            command = [
-                'ffmpeg',
-                '-i', temp_wav_path,
-                '-ac', '1',
-                '-ar', str(sample_rate),
-                '-c:a', 'libmp3lame',
-                '-q:a', '2',
-                '-y',
-                output_path
-            ]
-            
-            subprocess.run(command, check=True, capture_output=True, timeout=600)
-            
-            os.unlink(temp_wav_path)
-        else:
-            temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            temp_path = temp_wav.name
-            temp_wav.close()
-            
-            import soundfile as sf
-            sf.write(temp_path, processed_audio, sample_rate)
-            
-            command = [
-                'ffmpeg',
-                '-i', temp_path,
-                '-ac', '1',
-                '-ar', str(sample_rate),
-                '-c:a', 'libmp3lame',
-                '-q:a', '2',
-                '-y',
-                output_path
-            ]
-            
-            subprocess.run(command, check=True, capture_output=True, timeout=600)
-            
-            os.unlink(temp_path)
-        
-        processed_info = get_audio_info(output_path)
-        processed_duration = processed_info.get('duration', len(processed_audio) / sample_rate)
-        duration_reduction = ((original_duration - processed_duration) / original_duration * 100) if original_duration > 0 else 0
-        processed_info["stats"] = adaptive_result.get("stats", {})
-        
-        result = {
-            "success": True,
-            "message": "音频处理完成",
-            "file_type": "audio",
-            "processed_audio_file": os.path.basename(output_path),
-            "output_path": output_path,
-            "processed_info": processed_info,
-            "stats": {
-                "original_duration": round(original_duration, 2),
-                "processed_duration": round(processed_duration, 2),
-                "silence_segments_removed": adaptive_result['stats'].get('silence_segments_removed', 0),
-                "duration_reduction_percent": round(duration_reduction, 2),
-                "noise_reduction": adaptive_result['applied_params'].get('noise_reduction', noise_reduction),
-                "sample_rate": sample_rate
-            },
-            "analysis": adaptive_result.get("analysis", {}),
-            "applied_params": adaptive_result.get("applied_params", {})
-        }
-        
-        print(f"[Task {task_id}] 处理完成: {output_path}")
-        
-        try:
-            from .self_learning import record_processing
-            processing_features = {
-                'noise_floor_db': analysis['noise_floor_db'] if analysis else -50.0,
-                'signal_peak_db': analysis.get('signal_peak_db', -30.0) if analysis else -30.0,
-                'dynamic_range': analysis.get('dynamic_range', 20.0) if analysis else 20.0,
-                'spectral_flatness': audio_features.get('spectral_flatness', 0.5) if 'audio_features' in dir() else 0.5,
-                'spectral_centroid': audio_features.get('spectral_centroid', 1000.0) if 'audio_features' in dir() else 1000.0,
-                'noise_level': analysis.get('noise_level', 'medium') if analysis else 'medium',
-            }
-            processing_params = {
-                'scene': scene,
-                'noise_reduction': noise_reduction,
-                'silence_threshold': silence_threshold,
-                'min_silence_duration': min_silence_duration,
-                'highpass_cutoff': highpass_cutoff,
-                'target_db': target_db,
-            }
-            processing_result = {
-                'original_duration': original_duration,
-                'processed_duration': processed_duration,
-                'kept_ratio': processed_duration / original_duration if original_duration > 0 else 0,
-                'silence_removed_ratio': (original_duration - processed_duration) / original_duration if original_duration > 0 else 0,
-                'duration_reduction_percent': duration_reduction,
-            }
-            record_processing(input_path, processing_features, processing_params, processing_result)
-        except Exception as e:
-            print(f"[Task {task_id}] 自学习记录失败: {e}")
-        
+    def progress_callback(status, message, percentage):
+        update_progress(task_id, status, message, percentage)
+
+    try:
+        result = run_audio_pipeline(
+            input_path=input_path,
+            output_path=output_path,
+            scene=scene,
+            auto_detect=auto_detect,
+            noise_reduction=noise_reduction,
+            silence_threshold=silence_threshold,
+            min_silence_duration=min_silence_duration,
+            max_volume=max_volume,
+            stationary_noise=stationary_noise,
+            task_id=task_id,
+            progress_callback=progress_callback,
+            task_name=f"Task {task_id}",
+        )
+
         save_task_result(task_id, result)
-        update_progress(task_id, 'complete', '处理完成', 100)
+        if result.get('success'):
+            update_progress(task_id, 'complete', '处理完成', 100)
+        else:
+            update_progress(task_id, 'failed', result.get('message', '处理失败'), 100)
         clear_progress(task_id)
         cleanup_uploaded_file(task_id, input_path)
 

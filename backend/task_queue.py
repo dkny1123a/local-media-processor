@@ -28,77 +28,63 @@ celery_app.conf.update(
     task_reject_on_worker_lost=True,
 )
 
-@celery_app.task(bind=True, name='process_audio')
-def process_audio_task(
-    self,
-    input_path: str,
-    output_path: str,
-    options: Dict[str, Any]
-) -> Dict[str, Any]:
-    """
-    异步音频处理任务
-    
+def _execute_audio_processing(self, input_path: str, output_path: str, options: Dict[str, Any]) -> Dict[str, Any]:
+    """音频处理核心逻辑 - 调用完整处理管道
+
     Args:
-        self: Celery task instance
+        self: Celery task 实例（用于 update_state），来自调用方 task
         input_path: 输入音频文件路径
         output_path: 输出音频文件路径
         options: 处理选项
+            - scene: 场景（cycling/bluetooth/default 等）
+            - auto_detect: 是否自适应分析
+            - noise_reduction: 降噪强度
             - silence_threshold: 静音阈值 (dB)
             - min_silence_duration: 最小静音时长 (秒)
             - max_volume: 是否最大化音量
-    
-    Returns:
-        处理结果字典
+            - stationary_noise: 是否使用稳态噪声处理
     """
-    from .audio_processor import process_audio
-    from .model_manager import model_manager
-    
+    from .audio_pipeline import run_audio_pipeline
+
+    def progress_callback(status, message, percentage):
+        self.update_state(
+            state='PROCESSING',
+            meta={
+                'progress': percentage,
+                'stage': status,
+                'message': message
+            }
+        )
+
     try:
-        self.update_state(
-            state='PROCESSING',
-            meta={
-                'progress': 0,
-                'stage': 'loading',
-                'message': '正在加载音频文件'
-            }
-        )
-        
-        start_time = time.time()
-        
-        self.update_state(
-            state='PROCESSING',
-            meta={
-                'progress': 20,
-                'stage': 'processing',
-                'message': '正在处理音频'
-            }
-        )
-        
-        result = process_audio(
-            input_path,
-            output_path,
+        result = run_audio_pipeline(
+            input_path=input_path,
+            output_path=output_path,
+            scene=options.get('scene', 'default'),
+            auto_detect=options.get('auto_detect', True),
+            noise_reduction=options.get('noise_reduction', 0.0),
             silence_threshold=options.get('silence_threshold', -40.0),
             min_silence_duration=options.get('min_silence_duration', 0.5),
-            max_volume=options.get('max_volume', True)
+            max_volume=options.get('max_volume', True),
+            stationary_noise=options.get('stationary_noise', False),
+            task_id=self.request.id,
+            progress_callback=progress_callback,
+            task_name=f"Task {self.request.id}",
         )
-        
-        processing_time = time.time() - start_time
-        
-        self.update_state(
-            state='PROCESSING',
-            meta={
-                'progress': 100,
-                'stage': 'completed',
-                'message': '音频处理完成',
-                'processing_time': round(processing_time, 2)
-            }
-        )
-        
-        if result['success']:
-            result['stats']['processing_time'] = round(processing_time, 2)
-        
+
+        if result.get('success'):
+            self.update_state(
+                state='PROCESSING',
+                meta={
+                    'progress': 100,
+                    'stage': 'completed',
+                    'message': '音频处理完成',
+                    'processing_time': result.get('stats', {}).get('processing_time', 0)
+                }
+            )
+
         return result
-    
+
     except Exception as e:
         self.update_state(
             state='FAILED',
@@ -108,12 +94,23 @@ def process_audio_task(
                 'stage': 'failed'
             }
         )
-        
+
         return {
             'success': False,
             'message': f'音频处理失败: {str(e)}',
             'error_type': type(e).__name__
         }
+
+
+@celery_app.task(bind=True, name='process_audio')
+def process_audio_task(
+    self,
+    input_path: str,
+    output_path: str,
+    options: Dict[str, Any]
+) -> Dict[str, Any]:
+    """异步音频处理任务（入口）"""
+    return _execute_audio_processing(self, input_path, output_path, options)
 
 
 
@@ -146,14 +143,20 @@ def process_media_task(
         file_type = options.get('file_type', 'audio')
         
         if file_type == 'audio':
-            return process_audio_task(
+            # 复用 _execute_audio_processing 普通函数，self 是当前 process_media_task 的实例
+            # 这样 self.update_state() 会更新到用户查询的 process_media_task 的 task_id
+            return _execute_audio_processing(
                 self,
                 input_path,
                 output_path,
                 {
                     'silence_threshold': options.get('silence_threshold', -40.0),
                     'min_silence_duration': options.get('min_silence_duration', 0.5),
-                    'max_volume': options.get('max_volume', True)
+                    'max_volume': options.get('max_volume', True),
+                    'scene': options.get('scene', 'default'),
+                    'noise_reduction': options.get('noise_reduction', 0.0),
+                    'stationary_noise': options.get('stationary_noise', False),
+                    'auto_detect': options.get('auto_detect', True),
                 }
             )
         else:
