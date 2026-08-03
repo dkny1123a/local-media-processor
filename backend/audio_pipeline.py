@@ -86,14 +86,65 @@ def run_audio_pipeline(
 
         progress_callback('analyzing', '正在分析音频特征（噪声等级、动态范围）...', 20)
 
+        # ============================================================
+        # 问题1修复：整条音频分段扫描，不再只取前 60s
+        # ============================================================
+        # 原逻辑：仅取 i==0 的第一个 chunk 分析，break 退出
+        #   - 前 60s 可能不代表整条音频（中途开门/关窗/换场景）
+        #   - noise_floor 偏差导致全局阈值不准
+        #
+        # 新逻辑：扫描整条音频，每 60s 取一段，最多 10 个均匀分布的段
+        #   - 对所有段的 RMS dB 取第 5 百分位作为 noise_floor
+        #   - 用整条音频的 noise_floor 计算全局阈值
+        # ============================================================
+        import librosa as _librosa
+        analysis = None
+        all_rms_db_list = []
+        num_analysis_segments = min(10, num_chunks)
+        if num_analysis_segments < 1:
+            num_analysis_segments = 1
+
         chunk_generator, _, total_samples, _ = _load_audio_chunks(converted_path, sample_rate, chunk_duration)
 
-        analysis = None
+        # 均匀采样多个 chunk 的索引
+        if num_analysis_segments == 1:
+            sample_indices = [0]
+        else:
+            sample_indices = [int(i * (num_chunks - 1) / (num_analysis_segments - 1)) for i in range(num_analysis_segments)]
+
+        sampled_count = 0
         for i, chunk in enumerate(chunk_generator()):
-            if i == 0:
-                analysis = analyze_audio_characteristics(chunk, sample_rate)
-                print(f"{log_prefix} 分析完成: noise_floor={analysis['noise_floor_db']:.1f}dB, snr={analysis['signal_to_noise_ratio']:.1f}")
-            break
+            if i in sample_indices:
+                # 用第一个采样 chunk 做完整分析（包含频谱、flatness 等）
+                if sampled_count == 0:
+                    analysis = analyze_audio_characteristics(chunk, sample_rate)
+                # 累积所有采样段的 RMS dB 用于全局 noise_floor
+                frame_length = int(sample_rate * 0.02)
+                hop_length = int(sample_rate * 0.01)
+                rms = _librosa.feature.rms(y=chunk, frame_length=frame_length, hop_length=hop_length)[0]
+                rms_db = _librosa.amplitude_to_db(rms, ref=1.0)
+                all_rms_db_list.append(rms_db)
+                sampled_count += 1
+                del chunk
+                if sampled_count >= num_analysis_segments:
+                    break
+
+        if all_rms_db_list:
+            all_rms_db = np.concatenate(all_rms_db_list)
+            global_noise_floor_db = float(np.percentile(all_rms_db, 5))
+            global_signal_peak_db = float(np.percentile(all_rms_db, 95))
+            global_dynamic_range = global_signal_peak_db - global_noise_floor_db
+
+            if analysis:
+                analysis['noise_floor_db'] = global_noise_floor_db
+                analysis['signal_peak_db'] = global_signal_peak_db
+                analysis['dynamic_range'] = global_dynamic_range
+                analysis['signal_to_noise_ratio'] = global_dynamic_range
+
+            print(f"{log_prefix} 全局分析完成({sampled_count}段采样): "
+                  f"noise_floor={global_noise_floor_db:.1f}dB, "
+                  f"signal_peak={global_signal_peak_db:.1f}dB, "
+                  f"dynamic_range={global_dynamic_range:.1f}dB")
 
         if was_converted and os.path.exists(converted_path):
             os.unlink(converted_path)
@@ -135,8 +186,8 @@ def run_audio_pipeline(
                 # 不允许被自学习覆盖，避免异常值
                 print(f"{log_prefix} 自学习参数覆盖: nr={noise_reduction}, hp={highpass_cutoff}, st(保持自适应)={silence_threshold}")
 
-            # min_silence_duration 固定 1.5s
-            min_silence_duration = 1.5
+            # min_silence_duration 固定 0.8s（人耳不可辨识的持续时长门槛）
+            min_silence_duration = 0.8
         except Exception as e:
             print(f"{log_prefix} 自学习跳过: {e}")
 

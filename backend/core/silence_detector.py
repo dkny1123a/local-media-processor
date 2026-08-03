@@ -151,13 +151,18 @@ def remove_silence_segments(
     audio_data: np.ndarray,
     sample_rate: int,
     silence_segments: List[Tuple[float, float]],
+    fade_ms: int = 5,
 ) -> np.ndarray:
-    """Remove silent segments from audio data.
+    """Remove silent segments from audio data with fade in/out to avoid clicks.
+
+    问题3修复：原实现直接 concatenate，拼接点会有 DC offset 跳变 → 爆音
+    修复：对每个保留段首尾加 fade_ms 毫秒的线性淡入淡出
 
     Args:
         audio_data: Input audio numpy array
         sample_rate: Audio sample rate
         silence_segments: List of (start_time, end_time) tuples in seconds
+        fade_ms: Fade in/out duration in milliseconds (default 5ms)
 
     Returns:
         Audio data with silent segments removed
@@ -180,12 +185,22 @@ def remove_silence_segments(
     if not keep_ranges:
         return np.array([], dtype=audio_data.dtype)
 
+    fade_samples = int(sample_rate * fade_ms / 1000)
     chunks = []
     for start, end in keep_ranges:
         start_idx = int(start * sample_rate)
         end_idx = int(end * sample_rate)
         if start_idx < len(audio_data) and end_idx <= len(audio_data) and start_idx < end_idx:
-            chunks.append(audio_data[start_idx:end_idx])
+            segment = audio_data[start_idx:end_idx].copy()
+
+            # 仅对足够长的段应用淡入淡出，避免段过短时被衰减殆尽
+            if len(segment) > fade_samples * 2:
+                fade_in = np.linspace(0, 1, fade_samples)
+                fade_out = np.linspace(1, 0, fade_samples)
+                segment[:fade_samples] *= fade_in
+                segment[-fade_samples:] *= fade_out
+
+            chunks.append(segment)
 
     if not chunks:
         return np.array([], dtype=audio_data.dtype)
