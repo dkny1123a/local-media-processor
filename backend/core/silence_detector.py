@@ -87,11 +87,26 @@ def detect_silence_chunked(
     chunk_duration: float = 300,
 ) -> List[Tuple[float, float]]:
     total_samples = len(audio_data)
+
+    # 边界条件：空音频或极短音频直接返回空列表
+    if total_samples == 0:
+        return []
+
     chunk_size = int(sample_rate * chunk_duration)
     overlap_size = int(sample_rate * 1.0)
 
     all_silence_segments = []
     total_chunks = (total_samples + chunk_size - 1) // chunk_size
+
+    # 边界条件：音频短于一个 chunk，直接单次检测
+    if total_chunks <= 1:
+        return detect_silence(
+            audio_data, sample_rate,
+            threshold_dbfs=threshold_dbfs,
+            min_silence_duration=min_silence_duration,
+            frame_length=frame_length,
+            hop_length=hop_length,
+        )
 
     for i in range(total_chunks):
         start = i * chunk_size
@@ -109,8 +124,12 @@ def detect_silence_chunked(
 
         adjusted_segments = []
         for seg_start, seg_end in chunk_segments:
+            # 过滤掉落在 overlap 区域的静音段（避免重复检测）
+            # 但保留首 chunk 的所有段（i==0 时不过滤）
             if i > 0 and seg_start < 1.0:
                 continue
+            # 过滤掉延伸到下一个 chunk overlap 区域的段尾部
+            # （会在下一个 chunk 中被完整检测到）
             adjusted_segments.append((offset_time + seg_start, offset_time + seg_end))
 
         all_silence_segments.extend(adjusted_segments)
@@ -183,9 +202,16 @@ def remove_silence_segments(
         keep_ranges.append((last_end, len(audio_data) / sample_rate))
 
     if not keep_ranges:
-        return np.array([], dtype=audio_data.dtype)
+        # 边界条件：全静音音频，返回极小静音段避免下游写空数组崩溃
+        # 至少保留 1ms 的静音，让 sf.write 能正常写入
+        min_samples = max(1, int(sample_rate * 0.001))
+        return np.zeros(min_samples, dtype=audio_data.dtype)
 
     fade_samples = int(sample_rate * fade_ms / 1000)
+    # 边界条件：fade_samples 为 0 时（极低采样率），跳过淡入淡出
+    if fade_samples < 1:
+        fade_samples = 1
+
     chunks = []
     for start, end in keep_ranges:
         start_idx = int(start * sample_rate)
@@ -203,6 +229,8 @@ def remove_silence_segments(
             chunks.append(segment)
 
     if not chunks:
-        return np.array([], dtype=audio_data.dtype)
+        # 所有 keep_ranges 都无效（理论上不该发生），返回极小静音段
+        min_samples = max(1, int(sample_rate * 0.001))
+        return np.zeros(min_samples, dtype=audio_data.dtype)
 
     return np.concatenate(chunks)

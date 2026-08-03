@@ -568,41 +568,46 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
     if temp_wav_path and os.path.exists(temp_wav_path):
         try:
             from .core.silence_detector import detect_silence_chunked, remove_silence_segments
-            
+
             # 加载合并后的音频
             merged_audio, _ = librosa.load(temp_wav_path, sr=sample_rate, mono=True)
             pre_merge_duration = len(merged_audio) / sample_rate
-            
-            # 统一检测静音（使用分块检测，内部处理长音频）
-            silence_segments = detect_silence_chunked(
-                merged_audio,
-                sample_rate,
-                threshold_dbfs=silence_threshold,
-                min_silence_duration=min_silence_duration,
-                chunk_duration=300,
-            )
-            
-            if silence_segments:
-                silence_removed_duration = sum(end - start for start, end in silence_segments)
-                stats["silence_segments_removed"] = len(silence_segments)
-                
-                # 移除静音段（带 5ms 淡入淡出避免爆音）
-                merged_audio = remove_silence_segments(
-                    merged_audio, sample_rate, silence_segments, fade_ms=5
-                )
-                post_merge_duration = len(merged_audio) / sample_rate
-                
-                print(f"[{task_name}] 全局静音移除: 检测到{len(silence_segments)}段, "
-                      f"移除{silence_removed_duration:.1f}s, "
-                      f"合并前={pre_merge_duration:.1f}s, 合并后={post_merge_duration:.1f}s")
-                
-                # 写回临时文件
-                import soundfile as sf
-                sf.write(temp_wav_path, merged_audio, sample_rate)
-            else:
+
+            # 边界条件：空音频或极短音频跳过静音检测
+            if len(merged_audio) == 0:
+                print(f"[{task_name}] 全局静音检测：音频为空，跳过")
                 stats["silence_segments_removed"] = 0
-                print(f"[{task_name}] 全局静音检测: 无不可辨识片段")
-            
+            else:
+                # 统一检测静音（使用分块检测，内部处理长音频）
+                silence_segments = detect_silence_chunked(
+                    merged_audio,
+                    sample_rate,
+                    threshold_dbfs=silence_threshold,
+                    min_silence_duration=min_silence_duration,
+                    chunk_duration=300,
+                )
+
+                if silence_segments:
+                    silence_removed_duration = sum(end - start for start, end in silence_segments)
+                    stats["silence_segments_removed"] = len(silence_segments)
+
+                    # 移除静音段（带 5ms 淡入淡出避免爆音）
+                    merged_audio = remove_silence_segments(
+                        merged_audio, sample_rate, silence_segments, fade_ms=5
+                    )
+                    post_merge_duration = len(merged_audio) / sample_rate
+
+                    print(f"[{task_name}] 全局静音移除: 检测到{len(silence_segments)}段, "
+                          f"移除{silence_removed_duration:.1f}s, "
+                          f"合并前={pre_merge_duration:.1f}s, 合并后={post_merge_duration:.1f}s")
+
+                    # 写回临时文件（边界条件：merged_audio 至少有1个样本）
+                    import soundfile as sf
+                    sf.write(temp_wav_path, merged_audio, sample_rate)
+                else:
+                    stats["silence_segments_removed"] = 0
+                    print(f"[{task_name}] 全局静音检测: 无不可辨识片段")
+
             del merged_audio
             gc.collect()
         except Exception as e:
