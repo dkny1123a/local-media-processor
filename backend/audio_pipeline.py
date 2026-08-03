@@ -131,13 +131,11 @@ def run_audio_pipeline(
                     noise_reduction = learned_params['noise_reduction']
                 if 'highpass_cutoff' in learned_params:
                     highpass_cutoff = learned_params['highpass_cutoff']
-                # silence_threshold 经自学习合理性校验后才允许覆盖（见 self_learning.py）
-                if 'silence_threshold' in learned_params:
-                    silence_threshold = learned_params['silence_threshold']
-                print(f"{log_prefix} 自学习参数覆盖: nr={noise_reduction}, hp={highpass_cutoff}, st={silence_threshold}")
+                # silence_threshold 保持全局自适应值（基于原始音频 noise_floor+3dB），
+                # 不允许被自学习覆盖，避免异常值
+                print(f"{log_prefix} 自学习参数覆盖: nr={noise_reduction}, hp={highpass_cutoff}, st(保持自适应)={silence_threshold}")
 
-            # min_silence_duration 固定 1.5s（基准线匹配），
-            # 不再被自适应或自学习覆盖
+            # min_silence_duration 固定 1.5s
             min_silence_duration = 1.5
         except Exception as e:
             print(f"{log_prefix} 自学习跳过: {e}")

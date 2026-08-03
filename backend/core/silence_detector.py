@@ -145,3 +145,49 @@ def compute_silence_ratio(
 ) -> float:
     db = _compute_rms_db(audio_data, sample_rate)
     return float(np.mean(db < threshold_dbfs))
+
+
+def remove_silence_segments(
+    audio_data: np.ndarray,
+    sample_rate: int,
+    silence_segments: List[Tuple[float, float]],
+) -> np.ndarray:
+    """Remove silent segments from audio data.
+
+    Args:
+        audio_data: Input audio numpy array
+        sample_rate: Audio sample rate
+        silence_segments: List of (start_time, end_time) tuples in seconds
+
+    Returns:
+        Audio data with silent segments removed
+    """
+    if not silence_segments:
+        return audio_data
+
+    sorted_segments = sorted(silence_segments, key=lambda x: x[0])
+
+    keep_ranges = []
+    last_end = 0.0
+    for start, end in sorted_segments:
+        if start > last_end:
+            keep_ranges.append((last_end, start))
+        last_end = max(last_end, end)
+
+    if last_end < len(audio_data) / sample_rate:
+        keep_ranges.append((last_end, len(audio_data) / sample_rate))
+
+    if not keep_ranges:
+        return np.array([], dtype=audio_data.dtype)
+
+    chunks = []
+    for start, end in keep_ranges:
+        start_idx = int(start * sample_rate)
+        end_idx = int(end * sample_rate)
+        if start_idx < len(audio_data) and end_idx <= len(audio_data) and start_idx < end_idx:
+            chunks.append(audio_data[start_idx:end_idx])
+
+    if not chunks:
+        return np.array([], dtype=audio_data.dtype)
+
+    return np.concatenate(chunks)

@@ -12,7 +12,6 @@ from .core import (
     detect_silence,
     get_audio_duration,
     load_audio_chunk,
-    remove_silence,
 )
 
 
@@ -68,6 +67,7 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
     silence_count = 0
     non_voice_count = 0
     from .adaptive_processor import apply_highpass_filter
+    from .core.silence_detector import detect_silence, remove_silence_segments
     
     try:
         chunk_silence_threshold = silence_threshold
@@ -85,6 +85,46 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
             chunk_noise_reduction = chunk_params['noise_reduction']
             chunk_min_silence_duration = chunk_params['min_silence_duration']
             chunk_highpass_cutoff = chunk_params['highpass_cutoff']
+        
+        # ============================================================
+        # Step 1: 在处理链之前执行静音检测和移除
+        # ============================================================
+        # 关键设计：静音检测基于原始音频的 energy distribution，
+        # 不受处理链（动态压缩、可懂度提升等）的影响。
+        # 处理链会改变能量分布（比如抬高低能量区域 4-6dB），
+        # 如果在处理后检测，会导致原本的静音片段无法被正确识别。
+        #
+        # 流程：先检测 → 移除 → 再做处理链
+        # ============================================================
+        pre_silence_duration = len(audio_chunk) / sample_rate
+        
+        silence_segments = detect_silence(
+            audio_chunk,
+            sample_rate,
+            threshold_dbfs=chunk_silence_threshold,
+            min_silence_duration=chunk_min_silence_duration,
+        )
+        
+        silence_count = len(silence_segments)
+        silence_removed_duration = sum(end - start for start, end in silence_segments)
+        
+        if silence_count > 0:
+            audio_chunk = remove_silence_segments(audio_chunk, sample_rate, silence_segments)
+            post_silence_duration = len(audio_chunk) / sample_rate
+            
+            import librosa
+            frame_length = int(sample_rate * 0.02)
+            hop_length = int(sample_rate * 0.01)
+            rms = librosa.feature.rms(y=audio_chunk, frame_length=frame_length, hop_length=hop_length)[0]
+            db = librosa.amplitude_to_db(rms, ref=1.0)
+            if np.any(db < chunk_silence_threshold):
+                silence_ratio = np.mean(db < chunk_silence_threshold)
+                print(f"[Silence] 预移除: dB范围[{np.min(db):.1f}, {np.max(db):.1f}], "
+                      f"阈值={chunk_silence_threshold}, 剩余低于阈值={silence_ratio*100:.1f}%, "
+                      f"检测到{silence_count}段, 移除={silence_removed_duration:.1f}s")
+            
+            print(f"[Silence] 预处理={pre_silence_duration:.1f}s, 后处理={post_silence_duration:.1f}s, "
+                  f"移除不可辨识={silence_removed_duration:.1f}s")
         
         if scene == 'cycling' or scene == 'cycling_bluetooth':
             try:
@@ -171,22 +211,10 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
             audio_chunk = apply_highpass_filter(audio_chunk, sample_rate, chunk_highpass_cutoff)
 
         # ============================================================
-        # Per-chunk noise floor re-analysis (on PROCESSED audio)
+        # Step 2: 处理后的诊断日志（仅统计，不再检测/移除静音）
         # ============================================================
-        # 关键修复：噪声底噪必须在处理后的音频上重新计算
-        # 因为带通滤波、动态压缩、语音增强等处理会改变音频的能量分布
-        # 用原始音频的 noise_floor 去判断处理后的音频 = 阈值完全不匹配
-        #
-        # 原理：人耳不可辨识 = 信号能量 ≤ 噪声底噪 + 3dB
-        # 3dB 是声学 simultaneous masking（同时掩蔽）的临界值
-        # 低于此阈值的声音被环境噪声完全掩盖，人类听觉系统无法感知
-        #
-        # 阈值范围约束：noise_floor + [1dB, 10dB]
-        #   - 下限 1dB：避免与噪声底噪重合（完全无意义）
-        #   - 上限 10dB：避免把可辨识的低音量语音误判为不可辨识
-        #   - 不再依赖 signal_peak（之前的 signal_peak - 15dB 边界在
-        #     signal_peak 接近 noise_floor 时把阈值压到 noise_floor + 1dB，
-        #     导致永远检测不到任何不可辨识片段）
+        # 静音检测和移除已在 Step 1（处理链之前）完成
+        # 这里仅打印处理后音频的能量分布信息，用于诊断
         # ============================================================
         try:
             import librosa
@@ -195,50 +223,12 @@ def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
             rms_frames = librosa.feature.rms(y=audio_chunk, frame_length=frame_len, hop_length=hop_len)[0]
             rms_db_frames = librosa.amplitude_to_db(rms_frames, ref=1.0)
             chunk_noise_floor_db = float(np.percentile(rms_db_frames, 5))
-            # 基于处理后音频的噪声底噪计算"人耳不可辨识"阈值
-            # 核心公式：noise_floor + 3dB（同时掩蔽临界值）
-            chunk_silence_threshold = chunk_noise_floor_db + 3.0
-            # 范围约束：[noise_floor + 1dB, noise_floor + 10dB]
-            chunk_silence_threshold = min(chunk_silence_threshold, chunk_noise_floor_db + 10.0)
-            chunk_silence_threshold = max(chunk_silence_threshold, chunk_noise_floor_db + 1.0)
             pct_below = float(np.mean(rms_db_frames < chunk_silence_threshold))
-            print(f"[PerChunk] 处理后噪声底噪={chunk_noise_floor_db:.1f}dB, "
-                  f"不可辨识阈值={chunk_silence_threshold:.1f}dB (noise_floor+{chunk_silence_threshold - chunk_noise_floor_db:.1f}dB), "
-                  f"低于阈值帧占比={pct_below*100:.1f}%")
+            post_duration = len(audio_chunk) / sample_rate
+            print(f"[PostProcess] 处理后时长={post_duration:.1f}s, 噪声底噪={chunk_noise_floor_db:.1f}dB, "
+                  f"全局阈值={chunk_silence_threshold:.1f}dB, 低于阈值帧={pct_below*100:.1f}%")
         except Exception:
             pass
-
-        pre_silence_duration = len(audio_chunk) / sample_rate
-
-        silence_segments = detect_silence(
-            audio_chunk,
-            sample_rate,
-            threshold_dbfs=chunk_silence_threshold,
-            min_silence_duration=chunk_min_silence_duration,
-        )
-
-        silence_count = len(silence_segments)
-        silence_removed_duration = sum(end - start for start, end in silence_segments)
-
-        db = None
-        if silence_count > 0:
-            import librosa
-            frame_length = int(sample_rate * 0.02)
-            hop_length = int(sample_rate * 0.01)
-            rms = librosa.feature.rms(y=audio_chunk, frame_length=frame_length, hop_length=hop_length)
-            db = librosa.amplitude_to_db(rms, ref=1.0)
-            threshold = chunk_silence_threshold
-            silence_ratio = float(np.mean(db < threshold))
-            if silence_ratio > 0.1:
-                print(f"[Silence] dB范围: [{np.min(db):.1f}, {np.max(db):.1f}], 不可辨识阈值={threshold}, "
-                      f"低于阈值比例={silence_ratio*100:.1f}%, 检测到{silence_count}段不可辨识音频, 移除时长={silence_removed_duration:.1f}s")
-
-        if silence_segments:
-            audio_chunk = remove_silence(audio_chunk, sample_rate, silence_segments)
-        
-        post_silence_duration = len(audio_chunk) / sample_rate
-        if silence_removed_duration > 0:
-            print(f"[Silence] 处理前={pre_silence_duration:.1f}s, 处理后={post_silence_duration:.1f}s, 移除不可辨识={silence_removed_duration:.1f}s")
 
         return audio_chunk, silence_count, non_voice_count
     except Exception:
