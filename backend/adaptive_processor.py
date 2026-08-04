@@ -161,7 +161,9 @@ def calculate_adaptive_parameters(
     # ============================================================
     min_silence_duration = 0.8
 
-    target_db = -3.0
+    # loudnorm I 有效范围 [-70, -5]，-3 和 -1 超出范围会被 ffmpeg 拒绝
+    # -5 LUFS 接近广播标准（-23 LUFS 偏响），适合语音类音频最大化响度
+    target_db = -5.0
 
     has_low_freq_noise = noise_floor_db > -65
     highpass_cutoff = 150.0 if has_low_freq_noise else 0.0

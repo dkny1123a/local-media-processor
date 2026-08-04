@@ -160,7 +160,7 @@ def run_audio_pipeline(
             print(f"{log_prefix} 自适应参数: nr={noise_reduction}, hp={highpass_cutoff}, st={silence_threshold}")
         else:
             highpass_cutoff = 100.0 if scene == 'cycling' else 0.0
-            target_db = -3.0 if scene in ['bluetooth', 'cycling'] else -1.0
+            target_db = -5.0  # loudnorm I 有效范围 [-70, -5]，不能用 -3/-1
 
         try:
             from .self_learning import learn_optimal_parameters, record_processing
@@ -270,7 +270,11 @@ def run_audio_pipeline(
 
         if max_volume and temp_wav_path:
             progress_callback('processing', '正在调整音量...', 75)
-            print(f"{log_prefix} 音量偏移: +{volume_offset}dB (dynamic_range={dynamic_range:.1f}dB)")
+            # loudnorm 的 TP 预留偏移空间：TP + volume_offset ≤ -1.5dB
+            # 这样 loudnorm 后峰值=TP，叠加 volume 后峰值=TP+offset=-1.5dB，
+            # alimiter 几乎不介入，volume 偏移的增益不被 limiter 吃掉
+            effective_tp = -1.5 - volume_offset
+            print(f"{log_prefix} 音量偏移: +{volume_offset}dB (dynamic_range={dynamic_range:.1f}dB, TP={effective_tp:.1f}dB)")
             normalized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
             normalized_wav.close()
             normalized_path = normalized_wav.name
@@ -278,7 +282,7 @@ def run_audio_pipeline(
             command = [
                 'ffmpeg',
                 '-i', temp_wav_path,
-                '-af', f'loudnorm=I={target_db}:LRA=11:TP=-1.5,volume={volume_offset}dB,alimiter=limit=0.95',
+                '-af', f'loudnorm=I={target_db}:LRA=11:TP={effective_tp},volume={volume_offset}dB,alimiter=limit=0.95',
                 '-y',
                 '-loglevel', 'quiet',
                 normalized_path
