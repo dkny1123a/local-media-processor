@@ -264,8 +264,13 @@ def run_audio_pipeline(
         if was_converted_again and os.path.exists(converted_path_again):
             os.unlink(converted_path_again)
 
+        # 音量偏移：默认 +6dB；动态范围过小（<15dB）时降为 +4dB，避免放大噪声
+        dynamic_range = analysis.get('dynamic_range', 20.0) if analysis else 20.0
+        volume_offset = 6.0 if dynamic_range >= 15 else 4.0
+
         if max_volume and temp_wav_path:
             progress_callback('processing', '正在调整音量...', 75)
+            print(f"{log_prefix} 音量偏移: +{volume_offset}dB (dynamic_range={dynamic_range:.1f}dB)")
             normalized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
             normalized_wav.close()
             normalized_path = normalized_wav.name
@@ -273,7 +278,7 @@ def run_audio_pipeline(
             command = [
                 'ffmpeg',
                 '-i', temp_wav_path,
-                '-af', f'loudnorm=I={target_db}:LRA=11:TP=-1.5',
+                '-af', f'loudnorm=I={target_db}:LRA=11:TP=-1.5,volume={volume_offset}dB,alimiter=limit=0.95',
                 '-y',
                 '-loglevel', 'quiet',
                 normalized_path
@@ -300,6 +305,7 @@ def run_audio_pipeline(
                 'silence_threshold': silence_threshold,
                 'min_silence_duration': min_silence_duration,
                 'target_db': target_db,
+                'volume_offset': volume_offset,
                 'stationary_noise': stationary_noise,
                 'highpass_cutoff': highpass_cutoff,
                 'auto_detect': auto_detect,
@@ -419,6 +425,7 @@ def run_audio_pipeline(
                 'min_silence_duration': min_silence_duration,
                 'highpass_cutoff': highpass_cutoff,
                 'target_db': target_db,
+                'volume_offset': volume_offset,
             }
             processing_result = {
                 'original_duration': original_duration,
