@@ -257,30 +257,77 @@ def process_video(
             chunk_duration = 30
             num_chunks = int(np.ceil(total_duration / chunk_duration))
             
-            update_progress(0.25, '正在分析音频特征...', 'processing')
-            
+            update_progress(0.25, '正在分析音频特征（噪声等级、动态范围）...', 'processing')
+
+            # ============================================================
+            # 全局分析：整条音频分段扫描，不再只取第一个 chunk
+            # ============================================================
+            # 原逻辑：仅取 i==0 的第一个 chunk 分析，break 退出
+            #   - 前 30s 可能不代表整条音频（中途场景变化）
+            #   - noise_floor 偏差导致全局阈值不准
+            #
+            # 新逻辑：扫描整条音频，均匀采样最多 10 段
+            #   - 对所有段的 RMS dB 取第 5 百分位作为 noise_floor
+            #   - 用整条音频的 noise_floor 计算全局阈值
+            # ============================================================
+            from .adaptive_processor import analyze_audio_characteristics, calculate_adaptive_parameters, apply_highpass_filter
+            from .audio_chunk_processor import load_audio_chunk
+
             analysis = None
+            all_rms_db_list = []
+            num_analysis_segments = min(10, num_chunks)
+            if num_analysis_segments < 1:
+                num_analysis_segments = 1
+
+            if num_analysis_segments == 1:
+                sample_indices = [0]
+            else:
+                sample_indices = [int(i * (num_chunks - 1) / (num_analysis_segments - 1)) for i in range(num_analysis_segments)]
+
+            sampled_count = 0
             for i in range(num_chunks):
+                if i not in sample_indices:
+                    continue
                 offset = i * chunk_duration
                 try:
-                    from .audio_chunk_processor import load_audio_chunk
                     chunk = load_audio_chunk(audio_output_path, sample_rate, offset, chunk_duration)
                 except:
-                    chunk = librosa.load(audio_output_path, sr=sample_rate, mono=True, 
+                    chunk = librosa.load(audio_output_path, sr=sample_rate, mono=True,
                                         offset=offset, duration=chunk_duration)[0]
-                if i == 0:
-                    from .adaptive_processor import analyze_audio_characteristics, calculate_adaptive_parameters, apply_highpass_filter
+                if sampled_count == 0:
                     analysis = analyze_audio_characteristics(chunk, sample_rate)
-                    print(f"[Video] 分析完成: noise_floor={analysis['noise_floor_db']:.1f}dB, snr={analysis['signal_to_noise_ratio']:.1f}")
+                frame_length = int(sample_rate * 0.02)
+                hop_length = int(sample_rate * 0.01)
+                rms = librosa.feature.rms(y=chunk, frame_length=frame_length, hop_length=hop_length)[0]
+                rms_db = librosa.amplitude_to_db(rms, ref=1.0)
+                all_rms_db_list.append(rms_db)
+                sampled_count += 1
                 del chunk
-                if i == 0:
+                if sampled_count >= num_analysis_segments:
                     break
-            
+
+            if all_rms_db_list:
+                all_rms_db = np.concatenate(all_rms_db_list)
+                global_noise_floor_db = float(np.percentile(all_rms_db, 5))
+                global_signal_peak_db = float(np.percentile(all_rms_db, 95))
+                global_dynamic_range = global_signal_peak_db - global_noise_floor_db
+
+                if analysis:
+                    analysis['noise_floor_db'] = global_noise_floor_db
+                    analysis['signal_peak_db'] = global_signal_peak_db
+                    analysis['dynamic_range'] = global_dynamic_range
+                    analysis['signal_to_noise_ratio'] = global_dynamic_range
+
+                print(f"[Video] 全局分析完成({sampled_count}段采样): "
+                      f"noise_floor={global_noise_floor_db:.1f}dB, "
+                      f"signal_peak={global_signal_peak_db:.1f}dB, "
+                      f"dynamic_range={global_dynamic_range:.1f}dB")
+
             if auto_detect and analysis:
                 adaptive_params = calculate_adaptive_parameters(analysis, scene)
                 noise_reduction = adaptive_params['noise_reduction']
                 silence_threshold = adaptive_params['silence_threshold']
-                min_silence_duration = adaptive_params['min_silence_duration']
+                min_silence_duration = 0.8
                 target_db = adaptive_params['target_db']
                 highpass_cutoff = adaptive_params['highpass_cutoff']
                 print(f"[Video] 自适应参数: nr={noise_reduction}, hp={highpass_cutoff}, st={silence_threshold}")

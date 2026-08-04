@@ -61,43 +61,60 @@ def detect_non_voice_segments(audio_data, sample_rate, min_duration=0.5, flatnes
         return []
 
 
-def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction, 
+def process_single_chunk(audio_chunk, highpass_cutoff, noise_reduction,
                         silence_threshold, min_silence_duration, sample_rate,
                         scene='default', adaptive_chunk=False):
     silence_count = 0
     non_voice_count = 0
     from .adaptive_processor import apply_highpass_filter
-    
+    from .core.silence_detector import detect_silence, remove_silence_segments
+
     try:
         chunk_silence_threshold = silence_threshold
         chunk_noise_reduction = noise_reduction
         chunk_min_silence_duration = min_silence_duration
         chunk_highpass_cutoff = highpass_cutoff
-        
+
         if adaptive_chunk and scene not in ['cycling', 'cycling_bluetooth']:
             from .adaptive_processor import analyze_audio_characteristics, calculate_adaptive_parameters
-            
+
             chunk_analysis = analyze_audio_characteristics(audio_chunk, sample_rate)
             chunk_params = calculate_adaptive_parameters(chunk_analysis)
-            
-            chunk_silence_threshold = chunk_params['silence_threshold']
+
+            # 仅覆盖降噪和高通参数，静音阈值和时长使用全局值
             chunk_noise_reduction = chunk_params['noise_reduction']
-            chunk_min_silence_duration = chunk_params['min_silence_duration']
             chunk_highpass_cutoff = chunk_params['highpass_cutoff']
-        
+
         # ============================================================
-        # 问题2修复：per-chunk 不再做静音检测和移除
+        # 静音检测和移除：在处理链之前执行（基于原始音频能量）
         # ============================================================
-        # 原逻辑：每个 chunk 独立检测静音，会导致跨 chunk 边界的静音被漏检
-        #   - 例如 59.2s-60.8s 是 1.6s 静音，chunk 0 检测到 0.8s，chunk 1
-        #     检测到 0.8s，都 < 1.5s 不移除，但实际是 1.6s 应该移除
+        # 关键设计：静音检测基于原始音频的 energy distribution，
+        # 不受处理链（动态压缩、可懂度提升、降噪等）的影响。
+        # 处理链会改变能量分布（降噪拉低、压缩抬升），导致误判。
         #
-        # 新逻辑：per-chunk 只做处理链（降噪、滤波、增强等），
-        #   静音检测和移除在 process_audio_chunks 合并后统一执行
-        #   这样跨 chunk 边界的静音也能被完整检测到
+        # 流程：先检测 → 移除 → 再做处理链
+        # 使用从 audio_pipeline 传入的全局阈值（基于整条音频 noise_floor + 3dB）
         # ============================================================
-        silence_count = 0
-        silence_removed_duration = 0.0
+        pre_silence_duration = len(audio_chunk) / sample_rate
+
+        silence_segments = detect_silence(
+            audio_chunk,
+            sample_rate,
+            threshold_dbfs=chunk_silence_threshold,
+            min_silence_duration=chunk_min_silence_duration,
+        )
+
+        silence_count = len(silence_segments)
+        silence_removed_duration = sum(end - start for start, end in silence_segments)
+
+        if silence_count > 0:
+            audio_chunk = remove_silence_segments(
+                audio_chunk, sample_rate, silence_segments, fade_ms=5
+            )
+            print(f"[Silence] 预处理={pre_silence_duration:.1f}s, "
+                  f"移除{silence_count}段={silence_removed_duration:.1f}s, "
+                  f"阈值={chunk_silence_threshold:.1f}dB, "
+                  f"最小时长={chunk_min_silence_duration:.1f}s")
 
         if scene == 'cycling' or scene == 'cycling_bluetooth':
             try:
@@ -556,64 +573,8 @@ def process_audio_chunks(file_path, sample_rate, chunk_duration, highpass_cutoff
           f"超时={stats['timeout_chunks']}, 跳过={stats['skipped_chunks']}, "
           f"临时文件={stats['temp_files_created']}, 总耗时={stats['total_time']:.2f}s, "
           f"平均每块={avg_time:.2f}s, 最长={max_time:.2f}s")
-    
-    # ============================================================
-    # 问题2修复：合并后统一做静音检测和移除
-    # ============================================================
-    # 原 per-chunk 检测会漏掉跨 chunk 边界的静音片段
-    # 现在在合并后的整条音频上统一检测，使用 detect_silence_chunked
-    # 它会分块计算 RMS，然后合并所有静音段，最后过滤 min_silence_duration
-    # 这样跨边界的静音也能被完整检测到
-    # ============================================================
-    if temp_wav_path and os.path.exists(temp_wav_path):
-        try:
-            from .core.silence_detector import detect_silence_chunked, remove_silence_segments
 
-            # 加载合并后的音频
-            merged_audio, _ = librosa.load(temp_wav_path, sr=sample_rate, mono=True)
-            pre_merge_duration = len(merged_audio) / sample_rate
-
-            # 边界条件：空音频或极短音频跳过静音检测
-            if len(merged_audio) == 0:
-                print(f"[{task_name}] 全局静音检测：音频为空，跳过")
-                stats["silence_segments_removed"] = 0
-            else:
-                # 统一检测静音（使用分块检测，内部处理长音频）
-                silence_segments = detect_silence_chunked(
-                    merged_audio,
-                    sample_rate,
-                    threshold_dbfs=silence_threshold,
-                    min_silence_duration=min_silence_duration,
-                    chunk_duration=300,
-                )
-
-                if silence_segments:
-                    silence_removed_duration = sum(end - start for start, end in silence_segments)
-                    stats["silence_segments_removed"] = len(silence_segments)
-
-                    # 移除静音段（带 5ms 淡入淡出避免爆音）
-                    merged_audio = remove_silence_segments(
-                        merged_audio, sample_rate, silence_segments, fade_ms=5
-                    )
-                    post_merge_duration = len(merged_audio) / sample_rate
-
-                    print(f"[{task_name}] 全局静音移除: 检测到{len(silence_segments)}段, "
-                          f"移除{silence_removed_duration:.1f}s, "
-                          f"合并前={pre_merge_duration:.1f}s, 合并后={post_merge_duration:.1f}s")
-
-                    # 写回临时文件（边界条件：merged_audio 至少有1个样本）
-                    import soundfile as sf
-                    sf.write(temp_wav_path, merged_audio, sample_rate)
-                else:
-                    stats["silence_segments_removed"] = 0
-                    print(f"[{task_name}] 全局静音检测: 无不可辨识片段")
-
-            del merged_audio
-            gc.collect()
-        except Exception as e:
-            print(f"[{task_name}] 全局静音移除失败: {e}")
-    
     print(f"[{task_name}] 静音段统计: 累计移除={stats['silence_segments_removed']}")
     print(f"[{task_name}] 无人声段统计: 累计移除={stats['non_voice_segments_removed']}")
-    
+
     return processed_audio, stats, temp_wav_path
