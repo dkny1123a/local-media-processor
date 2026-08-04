@@ -246,11 +246,12 @@ def run_audio_pipeline(
         # Pass 2 (linear) 使用 Pass 1 测量的参数做固定线性增益 → 无 pumping
         actual_gain = 0.0
         if max_volume and temp_wav_path:
-            # Pass 1: 分析 loudnorm 参数（快速，不编码）
+            # Pass 1: 分析 loudnorm 参数（高通滤波后再分析，避免低频瓮声影响测量）
             import re, json as json_mod
+            analyze_af = f'highpass=f=80,loudnorm=I={target_db}:LRA=11:TP=-1.5:print_format=json'
             analyze_cmd = [
                 'ffmpeg', '-i', temp_wav_path,
-                '-af', f'loudnorm=I={target_db}:LRA=11:TP=-1.5:print_format=json',
+                '-af', analyze_af,
                 '-f', 'null', '-'
             ]
             analyze_result = subprocess.run(
@@ -274,22 +275,23 @@ def run_audio_pipeline(
                 target_offset = '0.0'
                 print(f"{log_prefix} loudnorm分析失败，使用默认参数")
 
-            # Pass 2: 线性归一化 + 降采样 + 峰值限制器 + MP3 编码
+            # Pass 2: 高通去瓮声 + 线性归一化 + 降采样 + 软限制器 + MP3 编码
             progress_callback('processing', '降采样+响度归一化+编码...', 80)
             af_str = (
-                f'aresample=16000,'
+                f'highpass=f=80,'
+                f'aresample=22050,'
                 f'loudnorm=I={target_db}:LRA=11:TP=-1.5:'
                 f'measured_I={measured_i}:measured_TP={measured_tp}:'
                 f'measured_LRA={measured_lra}:measured_thresh={measured_thresh}:'
                 f'offset={target_offset}:linear=true,'
-                f'alimiter=limit=0.97'
+                f'alimiter=limit=0.95:level=disabled:attack=5:release=50'
             )
             command = [
                 'ffmpeg',
                 '-i', temp_wav_path,
                 '-af', af_str,
                 '-ac', '1',
-                '-ar', '16000',
+                '-ar', '22050',
                 '-c:a', 'libmp3lame',
                 '-q:a', '2',
                 '-y',
@@ -314,9 +316,9 @@ def run_audio_pipeline(
                 command = [
                     'ffmpeg',
                     '-i', temp_wav_path,
-                    '-af', 'aresample=16000',
+                    '-af', 'highpass=f=80,aresample=22050',
                     '-ac', '1',
-                    '-ar', '16000',
+                    '-ar', '22050',
                     '-c:a', 'libmp3lame',
                     '-q:a', '2',
                     '-y',
@@ -327,7 +329,7 @@ def run_audio_pipeline(
                     subprocess.run(command, check=True, capture_output=True, timeout=600)
                     os.unlink(temp_wav_path)
                     temp_wav_path = None
-                    sample_rate = 16000
+                    sample_rate = 22050
                 except subprocess.CalledProcessError as e:
                     stderr = e.stderr.decode('utf-8', errors='replace') if e.stderr else ''
                     print(f"{log_prefix} 编码失败: {stderr[:500]}")
@@ -343,9 +345,9 @@ def run_audio_pipeline(
                 command = [
                     'ffmpeg',
                     '-i', temp_path,
-                    '-af', 'aresample=16000',
+                    '-af', 'highpass=f=80,aresample=22050',
                     '-ac', '1',
-                    '-ar', '16000',
+                    '-ar', '22050',
                     '-c:a', 'libmp3lame',
                     '-q:a', '2',
                     '-y',
@@ -354,7 +356,7 @@ def run_audio_pipeline(
                 ]
                 subprocess.run(command, check=True, capture_output=True, timeout=600)
                 os.unlink(temp_path)
-                sample_rate = 16000
+                sample_rate = 22050
 
         silence_segments_removed = cycling_stats.get('silence_segments_removed', 0) if cycling_stats else 0
         non_voice_segments_removed = cycling_stats.get('non_voice_segments_removed', 0) if cycling_stats else 0
