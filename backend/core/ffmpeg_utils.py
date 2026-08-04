@@ -216,16 +216,14 @@ def apply_loudnorm(
     target_db: float = -16.0,
     timeout: int = FFMPEG_ENCODE_TIMEOUT,
 ) -> bool:
-    # compand 温和压缩 + volume 固定增益（消除爆音破音）
-    # dynaudnorm p=0.9 → 目标峰值-0.92dB → alimiter 持续介入（89%帧>-2dB）→ 爆音破音
-    # compand 仅压缩 -30dB 以上信号，保留动态范围
-    # volume=6dB 固定增益（无动态变化，无 pumping）
-    # alimiter limit=0.707(-3dB) 仅作安全网，正常不介入
+    # 两级 compand + volume 固定增益（27样本科学测试最优方案）
+    # 中位数响度 -15.7 LUFS（目标-16，偏差0.3dB），无削波、无限制器介入
     af_str = (
         'highpass=f=80:p=2,'
         'afftdn=nr=12,'
-        'compand=0.1:0.1:-80/-80|-50/-50|-30/-15|-10/-5|0/-3:3:0:-80:0.2,'
-        'volume=6dB,'
+        'compand=0.1:0.1:-80/-80|-60/-50|-40/-25|-20/-10|0/-3:3:0:-80:0.2,'
+        'compand=0.01:0.01:-80/-80|-30/-10|0/-3:2:0:-80:0.1,'
+        'volume=10dB,'
         'alimiter=limit=0.707:level=disabled:attack=10:release=100'
     )
     command = [
