@@ -160,7 +160,7 @@ def run_audio_pipeline(
             print(f"{log_prefix} 自适应参数: nr={noise_reduction}, hp={highpass_cutoff}, st={silence_threshold}")
         else:
             highpass_cutoff = 100.0 if scene == 'cycling' else 0.0
-            target_db = -5.0  # loudnorm I 有效范围 [-70, -5]，不能用 -3/-1
+            target_db = -16.0  # 流媒体标准响度，详见 adaptive_processor.py 注释
 
         try:
             from .self_learning import learn_optimal_parameters, record_processing
@@ -228,15 +228,7 @@ def run_audio_pipeline(
             print(f"{log_prefix} 分块处理失败: {e}")
             raise
 
-        progress_callback('processing', '降采样+音量归一化...', 75)
-
-        # 音量偏移：默认 +6dB；动态范围过小（<15dB）时降为 +4dB，避免放大噪声
-        dynamic_range = analysis.get('dynamic_range', 20.0) if analysis else 20.0
-        volume_offset = 6.0 if dynamic_range >= 15 else 4.0
-
-        # 合并降采样+loudnorm+volume+alimiter 为单次 ffmpeg pass
-        # TP 预留偏移空间：TP + volume_offset ≤ -1.5dB，使 alimiter 不介入
-        effective_tp = -1.5 - volume_offset
+        progress_callback('processing', '正在分析音频响度...', 70)
 
         # 强制输出路径为 .mp3 后缀
         output_base = os.path.splitext(output_path)[0]
@@ -249,17 +241,49 @@ def run_audio_pipeline(
         output_dir = os.path.dirname(output_path)
         os.makedirs(output_dir, exist_ok=True)
 
-        # 构建 ffmpeg 滤镜链：降采样 + loudnorm + volume + alimiter + MP3 编码
-        audio_filters = [
-            'aresample=16000',
-            f'loudnorm=I={target_db}:LRA=11:TP={effective_tp}',
-            f'volume={volume_offset}dB',
-            'alimiter=limit=0.95',
-        ]
-
+        # loudnorm 双 pass 线性归一化：
+        # Pass 1 (dynamic) 会做实时动态增益调整 → pumping effect → 人声失真
+        # Pass 2 (linear) 使用 Pass 1 测量的参数做固定线性增益 → 无 pumping
+        actual_gain = 0.0
         if max_volume and temp_wav_path:
-            af_str = ','.join(audio_filters)
-            print(f"{log_prefix} 合并处理: +{volume_offset}dB (DR={dynamic_range:.1f}dB, TP={effective_tp:.1f}dB)")
+            # Pass 1: 分析 loudnorm 参数（快速，不编码）
+            import re, json as json_mod
+            analyze_cmd = [
+                'ffmpeg', '-i', temp_wav_path,
+                '-af', f'loudnorm=I={target_db}:LRA=11:TP=-1.5:print_format=json',
+                '-f', 'null', '-'
+            ]
+            analyze_result = subprocess.run(
+                analyze_cmd, capture_output=True, text=True, timeout=300
+            )
+            # 解析 JSON 输出
+            json_match = re.search(r'\{[^}]+\}', analyze_result.stderr, re.DOTALL)
+            if json_match:
+                ln_data = json_mod.loads(json_match.group(0))
+                measured_i = ln_data.get('input_i', '-23.0')
+                measured_tp = ln_data.get('input_tp', '-2.0')
+                measured_lra = ln_data.get('input_lra', '11.0')
+                measured_thresh = ln_data.get('input_thresh', '-33.0')
+                target_offset = ln_data.get('target_offset', '0.0')
+                print(f"{log_prefix} loudnorm分析: I={measured_i} TP={measured_tp} LRA={measured_lra} → 目标 I={target_db} LUFS")
+            else:
+                measured_i = '-23.0'
+                measured_tp = '-2.0'
+                measured_lra = '11.0'
+                measured_thresh = '-33.0'
+                target_offset = '0.0'
+                print(f"{log_prefix} loudnorm分析失败，使用默认参数")
+
+            # Pass 2: 线性归一化 + 降采样 + 峰值限制器 + MP3 编码
+            progress_callback('processing', '降采样+响度归一化+编码...', 80)
+            af_str = (
+                f'aresample=16000,'
+                f'loudnorm=I={target_db}:LRA=11:TP=-1.5:'
+                f'measured_I={measured_i}:measured_TP={measured_tp}:'
+                f'measured_LRA={measured_lra}:measured_thresh={measured_thresh}:'
+                f'offset={target_offset}:linear=true,'
+                f'alimiter=limit=0.97'
+            )
             command = [
                 'ffmpeg',
                 '-i', temp_wav_path,
@@ -278,7 +302,7 @@ def run_audio_pipeline(
                 os.unlink(temp_wav_path)
                 temp_wav_path = None
                 sample_rate = 16000
-                print(f"{log_prefix} 降采样+音量归一化+编码完成")
+                print(f"{log_prefix} 降采样+响度归一化+编码完成")
             except subprocess.TimeoutExpired:
                 print(f"{log_prefix} ffmpeg 处理超时")
             except subprocess.CalledProcessError as e:
@@ -343,7 +367,7 @@ def run_audio_pipeline(
                 'silence_threshold': silence_threshold,
                 'min_silence_duration': min_silence_duration,
                 'target_db': target_db,
-                'volume_offset': volume_offset,
+                'loudnorm_mode': 'linear',
                 'stationary_noise': stationary_noise,
                 'highpass_cutoff': highpass_cutoff,
                 'auto_detect': auto_detect,
@@ -406,7 +430,7 @@ def run_audio_pipeline(
                 'min_silence_duration': min_silence_duration,
                 'highpass_cutoff': highpass_cutoff,
                 'target_db': target_db,
-                'volume_offset': volume_offset,
+                'loudnorm_mode': 'linear',
             }
             processing_result = {
                 'original_duration': original_duration,
