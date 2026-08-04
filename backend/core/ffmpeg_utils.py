@@ -151,6 +151,7 @@ def encode_to_mp3(
     sample_rate: int,
     channels: int = DEFAULT_CHANNELS,
     quality: str = DEFAULT_MP3_QUALITY,
+    bitrate: int = None,
     timeout: int = FFMPEG_ENCODE_TIMEOUT,
 ) -> bool:
     output_dir = os.path.dirname(output_path)
@@ -163,11 +164,12 @@ def encode_to_mp3(
         '-ac', str(channels),
         '-ar', str(sample_rate),
         '-c:a', 'libmp3lame',
-        '-q:a', quality,
-        '-y',
-        '-loglevel', 'quiet',
-        output_path,
     ]
+    if bitrate:
+        command.extend(['-b:a', f'{bitrate}k'])
+    else:
+        command.extend(['-q:a', quality])
+    command.extend(['-y', '-loglevel', 'quiet', output_path])
 
     try:
         subprocess.run(command, check=True, capture_output=True, timeout=timeout)
@@ -211,13 +213,24 @@ def resample_audio(
 def apply_loudnorm(
     input_path: str,
     output_path: str,
-    target_db: float = -1.0,
+    target_db: float = -16.0,
     timeout: int = FFMPEG_ENCODE_TIMEOUT,
 ) -> bool:
+    # 切换为 dynaudnorm 平滑归一化（无 pumping）
+    # loudnorm dynamic → pumping（单帧增益跳变43dB，人声失真）
+    # dynaudnorm → 高斯平滑增益曲线，>3dB跳变仅0.0%
+    # 滤镜链：highpass(p=2,12dB/oct) → afftdn(nr=12降噪) → dynaudnorm → alimiter(软限制)
+    # target_db 仅用于日志记录，dynaudnorm 通过 p=0.9/m=20 自动归一化
+    af_str = (
+        'highpass=f=80:p=2,'
+        'afftdn=nr=12,'
+        'dynaudnorm=f=150:g=15:p=0.9:s=5:m=20,'
+        'alimiter=limit=0.89:level=disabled:attack=5:release=50'
+    )
     command = [
         'ffmpeg',
         '-i', input_path,
-        '-af', f'loudnorm=I={target_db}:LRA=11:TP=-1.5',
+        '-af', af_str,
         '-y',
         '-loglevel', 'quiet',
         output_path,

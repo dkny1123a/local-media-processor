@@ -809,9 +809,9 @@ async def concatenate_audio(
                     '-safe', '0',
                     '-i', concat_list_path,
                     '-ac', '1',
-                    '-ar', '44100',
+                    '-ar', '22050',
                     '-c:a', 'libmp3lame',
-                    '-q:a', '2',
+                    '-b:a', '96k',
                     '-y',
                     '-loglevel', 'quiet',
                     output_path

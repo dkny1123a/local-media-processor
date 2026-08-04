@@ -4,7 +4,7 @@
 把同步路径（main.py 的 process_audio_background）和异步路径
 （task_queue.py 的 _execute_audio_processing）共用的核心逻辑提取到这里，
 确保两条路径都走完整的处理流程（scene、自适应参数、自学习、FRCRN、VAD、
-蓝牙优化、loudnorm 等）。
+蓝牙优化、dynaudnorm 等）。
 """
 
 
@@ -241,50 +241,21 @@ def run_audio_pipeline(
         output_dir = os.path.dirname(output_path)
         os.makedirs(output_dir, exist_ok=True)
 
-        # loudnorm 双 pass 线性归一化：
-        # Pass 1 (dynamic) 会做实时动态增益调整 → pumping effect → 人声失真
-        # Pass 2 (linear) 使用 Pass 1 测量的参数做固定线性增益 → 无 pumping
-        actual_gain = 0.0
+        # 单 pass dynaudnorm 平滑归一化：
+        # loudnorm dynamic → pumping（单帧增益跳变 43dB，人声失真）
+        # loudnorm linear  → 增益不足（目标-16实际-20，偏差4dB）
+        # dynaudnorm       → 高斯平滑增益曲线，无 pumping（>3dB跳变仅0.0%），响度-19 LUFS
+        #
+        # 滤镜链：highpass(p=2,12dB/oct陡截止) → afftdn(nr=12降噪) → dynaudnorm(平滑归一化)
+        #         → aresample(22050Hz) → alimiter(软限制) → MP3 CBR 96kbps
         if max_volume and temp_wav_path:
-            # Pass 1: 分析 loudnorm 参数（高通滤波后再分析，避免低频瓮声影响测量）
-            import re, json as json_mod
-            analyze_af = f'highpass=f=80,loudnorm=I={target_db}:LRA=11:TP=-1.5:print_format=json'
-            analyze_cmd = [
-                'ffmpeg', '-i', temp_wav_path,
-                '-af', analyze_af,
-                '-f', 'null', '-'
-            ]
-            analyze_result = subprocess.run(
-                analyze_cmd, capture_output=True, text=True, timeout=300
-            )
-            # 解析 JSON 输出
-            json_match = re.search(r'\{[^}]+\}', analyze_result.stderr, re.DOTALL)
-            if json_match:
-                ln_data = json_mod.loads(json_match.group(0))
-                measured_i = ln_data.get('input_i', '-23.0')
-                measured_tp = ln_data.get('input_tp', '-2.0')
-                measured_lra = ln_data.get('input_lra', '11.0')
-                measured_thresh = ln_data.get('input_thresh', '-33.0')
-                target_offset = ln_data.get('target_offset', '0.0')
-                print(f"{log_prefix} loudnorm分析: I={measured_i} TP={measured_tp} LRA={measured_lra} → 目标 I={target_db} LUFS")
-            else:
-                measured_i = '-23.0'
-                measured_tp = '-2.0'
-                measured_lra = '11.0'
-                measured_thresh = '-33.0'
-                target_offset = '0.0'
-                print(f"{log_prefix} loudnorm分析失败，使用默认参数")
-
-            # Pass 2: 高通去瓮声 + 线性归一化 + 降采样 + 软限制器 + MP3 编码
-            progress_callback('processing', '降采样+响度归一化+编码...', 80)
+            progress_callback('processing', '降噪+响度归一化+编码...', 80)
             af_str = (
-                f'highpass=f=80,'
-                f'aresample=22050,'
-                f'loudnorm=I={target_db}:LRA=11:TP=-1.5:'
-                f'measured_I={measured_i}:measured_TP={measured_tp}:'
-                f'measured_LRA={measured_lra}:measured_thresh={measured_thresh}:'
-                f'offset={target_offset}:linear=true,'
-                f'alimiter=limit=0.95:level=disabled:attack=5:release=50'
+                'highpass=f=80:p=2,'
+                'afftdn=nr=12,'
+                'dynaudnorm=f=150:g=15:p=0.9:s=5:m=20,'
+                'aresample=22050,'
+                'alimiter=limit=0.89:level=disabled:attack=5:release=50'
             )
             command = [
                 'ffmpeg',
@@ -293,7 +264,7 @@ def run_audio_pipeline(
                 '-ac', '1',
                 '-ar', '22050',
                 '-c:a', 'libmp3lame',
-                '-q:a', '2',
+                '-b:a', '96k',
                 '-y',
                 '-loglevel', 'quiet',
                 output_path
@@ -303,24 +274,24 @@ def run_audio_pipeline(
                 subprocess.run(command, check=True, capture_output=True, timeout=600)
                 os.unlink(temp_wav_path)
                 temp_wav_path = None
-                sample_rate = 16000
-                print(f"{log_prefix} 降采样+响度归一化+编码完成")
+                sample_rate = 22050
+                print(f"{log_prefix} 降噪+响度归一化+编码完成")
             except subprocess.TimeoutExpired:
                 print(f"{log_prefix} ffmpeg 处理超时")
             except subprocess.CalledProcessError as e:
                 stderr = e.stderr.decode('utf-8', errors='replace') if e.stderr else ''
                 print(f"{log_prefix} ffmpeg 处理失败: {stderr[:500]}")
         else:
-            # 无音量调整，仅降采样+编码
+            # 无音量调整，仅降噪+降采样+编码
             if temp_wav_path and os.path.exists(temp_wav_path):
                 command = [
                     'ffmpeg',
                     '-i', temp_wav_path,
-                    '-af', 'highpass=f=80,aresample=22050',
+                    '-af', 'highpass=f=80:p=2,afftdn=nr=12,aresample=22050',
                     '-ac', '1',
                     '-ar', '22050',
                     '-c:a', 'libmp3lame',
-                    '-q:a', '2',
+                    '-b:a', '96k',
                     '-y',
                     '-loglevel', 'quiet',
                     output_path
@@ -345,11 +316,11 @@ def run_audio_pipeline(
                 command = [
                     'ffmpeg',
                     '-i', temp_path,
-                    '-af', 'highpass=f=80,aresample=22050',
+                    '-af', 'highpass=f=80:p=2,afftdn=nr=12,aresample=22050',
                     '-ac', '1',
                     '-ar', '22050',
                     '-c:a', 'libmp3lame',
-                    '-q:a', '2',
+                    '-b:a', '96k',
                     '-y',
                     '-loglevel', 'quiet',
                     output_path
@@ -369,7 +340,7 @@ def run_audio_pipeline(
                 'silence_threshold': silence_threshold,
                 'min_silence_duration': min_silence_duration,
                 'target_db': target_db,
-                'loudnorm_mode': 'linear',
+                'loudnorm_mode': 'dynaudnorm',
                 'stationary_noise': stationary_noise,
                 'highpass_cutoff': highpass_cutoff,
                 'auto_detect': auto_detect,
@@ -432,7 +403,7 @@ def run_audio_pipeline(
                 'min_silence_duration': min_silence_duration,
                 'highpass_cutoff': highpass_cutoff,
                 'target_db': target_db,
-                'loudnorm_mode': 'linear',
+                'loudnorm_mode': 'dynaudnorm',
             }
             processing_result = {
                 'original_duration': original_duration,

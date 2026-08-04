@@ -36,7 +36,7 @@ def save_as_mp3(audio_data, sample_rate, output_path):
 
     try:
         sf.write(temp_path, audio_data, sample_rate)
-        success = encode_to_mp3(temp_path, output_path, sample_rate)
+        success = encode_to_mp3(temp_path, output_path, sample_rate, bitrate=96)
         return success
     except Exception as e:
         print(f"保存MP3失败: {str(e)}")

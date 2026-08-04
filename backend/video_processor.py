@@ -363,27 +363,27 @@ def process_video(
                         os.unlink(normalized_path)
             
             if scene in ['cycling', 'cycling_bluetooth', 'bluetooth'] and temp_wav_path:
-                update_progress(0.88, '蓝牙优化（降采样至16kHz）...', 'processing')
+                update_progress(0.88, '降采样至22.05kHz...', 'processing')
                 optimized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
                 optimized_wav.close()
                 optimized_path = optimized_wav.name
 
-                success = resample_audio(temp_wav_path, optimized_path, target_sample_rate=16000, timeout=300)
+                success = resample_audio(temp_wav_path, optimized_path, target_sample_rate=22050, timeout=300)
 
                 if success:
                     os.unlink(temp_wav_path)
                     temp_wav_path = optimized_path
-                    sample_rate = 16000
+                    sample_rate = 22050
                     print(f"[Video] 降采样完成: {sample_rate}Hz")
                 else:
                     print(f"[Video] 降采样失败")
                     if os.path.exists(optimized_path):
                         os.unlink(optimized_path)
-            
+
             update_progress(0.9, '正在编码为MP3格式...', 'processing')
 
             if temp_wav_path and os.path.exists(temp_wav_path):
-                success = encode_to_mp3(temp_wav_path, processed_audio_path, sample_rate, timeout=600)
+                success = encode_to_mp3(temp_wav_path, processed_audio_path, sample_rate, bitrate=96, timeout=600)
                 if not success:
                     raise Exception("MP3编码失败")
                 os.unlink(temp_wav_path)
@@ -394,7 +394,7 @@ def process_video(
 
                 sf.write(temp_path, processed_audio, sample_rate)
 
-                success = encode_to_mp3(temp_path, processed_audio_path, sample_rate, timeout=600)
+                success = encode_to_mp3(temp_path, processed_audio_path, sample_rate, bitrate=96, timeout=600)
                 if not success:
                     raise Exception("MP3编码失败")
 

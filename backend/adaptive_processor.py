@@ -160,8 +160,9 @@ def calculate_adaptive_parameters(
     # ============================================================
     min_silence_duration = 0.8
 
-    # loudnorm I: -16 LUFS = 流媒体标准（Spotify/Apple Music），适合语音类音频
-    # -5 LUFS 过于激进，导致过度压缩和 pumping；-16 是响度与动态范围的最佳平衡
+    # 目标响度参考值 -16 LUFS（流媒体标准）
+    # 注意：dynaudnorm 不直接使用此值，而是通过 p=0.9/m=20 平滑归一化
+    # 此值仅用于日志记录和 applied_params 返回
     target_db = -16.0
 
     has_low_freq_noise = noise_floor_db > -65
