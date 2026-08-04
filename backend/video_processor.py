@@ -5,7 +5,7 @@ import librosa
 import soundfile as sf
 import tempfile
 import multiprocessing as mp
-from .adaptive_processor import process_audio_adaptive, apply_highpass_filter
+from .adaptive_processor import apply_highpass_filter
 from .audio_chunk_processor import process_audio_chunks, load_audio_chunk, get_audio_duration, process_chunk_with_timeout
 from .core import apply_loudnorm, encode_to_mp3, resample_audio
 

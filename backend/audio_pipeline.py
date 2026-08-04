@@ -228,75 +228,109 @@ def run_audio_pipeline(
             print(f"{log_prefix} 分块处理失败: {e}")
             raise
 
-        progress_callback('processing', '蓝牙优化（降采样至16kHz）...', 85)
-
-        optimized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-        optimized_wav.close()
-        optimized_path = optimized_wav.name
-
-        target_sample_rate = 16000
-        if sample_rate > target_sample_rate:
-            command = [
-                'ffmpeg',
-                '-i', temp_wav_path,
-                '-ac', '1',
-                '-ar', str(target_sample_rate),
-                '-y',
-                '-loglevel', 'quiet',
-                optimized_path
-            ]
-
-            try:
-                subprocess.run(command, check=True, capture_output=True, timeout=300)
-                os.unlink(temp_wav_path)
-                temp_wav_path = optimized_path
-                sample_rate = target_sample_rate
-                print(f"{log_prefix} 降采样完成: {sample_rate}Hz")
-            except subprocess.TimeoutExpired:
-                print(f"{log_prefix} 降采样超时")
-                os.unlink(optimized_path)
-            except Exception as e:
-                print(f"{log_prefix} 降采样失败: {e}")
-                os.unlink(optimized_path)
-        else:
-            print(f"{log_prefix} 采样率{sample_rate}Hz无需降采样")
-
-        if was_converted_again and os.path.exists(converted_path_again):
-            os.unlink(converted_path_again)
+        progress_callback('processing', '降采样+音量归一化...', 75)
 
         # 音量偏移：默认 +6dB；动态范围过小（<15dB）时降为 +4dB，避免放大噪声
         dynamic_range = analysis.get('dynamic_range', 20.0) if analysis else 20.0
         volume_offset = 6.0 if dynamic_range >= 15 else 4.0
 
-        if max_volume and temp_wav_path:
-            progress_callback('processing', '正在调整音量...', 75)
-            # loudnorm 的 TP 预留偏移空间：TP + volume_offset ≤ -1.5dB
-            # 这样 loudnorm 后峰值=TP，叠加 volume 后峰值=TP+offset=-1.5dB，
-            # alimiter 几乎不介入，volume 偏移的增益不被 limiter 吃掉
-            effective_tp = -1.5 - volume_offset
-            print(f"{log_prefix} 音量偏移: +{volume_offset}dB (dynamic_range={dynamic_range:.1f}dB, TP={effective_tp:.1f}dB)")
-            normalized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            normalized_wav.close()
-            normalized_path = normalized_wav.name
+        # 合并降采样+loudnorm+volume+alimiter 为单次 ffmpeg pass
+        # TP 预留偏移空间：TP + volume_offset ≤ -1.5dB，使 alimiter 不介入
+        effective_tp = -1.5 - volume_offset
 
+        # 强制输出路径为 .mp3 后缀
+        output_base = os.path.splitext(output_path)[0]
+        if not output_base.endswith('_processed'):
+            output_base = output_base + '_processed'
+        mp3_output_path = output_base + '.mp3'
+        if output_path != mp3_output_path:
+            output_path = mp3_output_path
+
+        output_dir = os.path.dirname(output_path)
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 构建 ffmpeg 滤镜链：降采样 + loudnorm + volume + alimiter + MP3 编码
+        audio_filters = [
+            'aresample=16000',
+            f'loudnorm=I={target_db}:LRA=11:TP={effective_tp}',
+            f'volume={volume_offset}dB',
+            'alimiter=limit=0.95',
+        ]
+
+        if max_volume and temp_wav_path:
+            af_str = ','.join(audio_filters)
+            print(f"{log_prefix} 合并处理: +{volume_offset}dB (DR={dynamic_range:.1f}dB, TP={effective_tp:.1f}dB)")
             command = [
                 'ffmpeg',
                 '-i', temp_wav_path,
-                '-af', f'loudnorm=I={target_db}:LRA=11:TP={effective_tp},volume={volume_offset}dB,alimiter=limit=0.95',
+                '-af', af_str,
+                '-ac', '1',
+                '-ar', '16000',
+                '-c:a', 'libmp3lame',
+                '-q:a', '2',
                 '-y',
                 '-loglevel', 'quiet',
-                normalized_path
+                output_path
             ]
 
             try:
-                subprocess.run(command, check=True, capture_output=True, timeout=300)
+                subprocess.run(command, check=True, capture_output=True, timeout=600)
                 os.unlink(temp_wav_path)
-                temp_wav_path = normalized_path
+                temp_wav_path = None
+                sample_rate = 16000
+                print(f"{log_prefix} 降采样+音量归一化+编码完成")
             except subprocess.TimeoutExpired:
-                print(f"{log_prefix} 音量调整超时")
-                os.unlink(normalized_path)
-            except:
-                os.unlink(normalized_path)
+                print(f"{log_prefix} ffmpeg 处理超时")
+            except subprocess.CalledProcessError as e:
+                stderr = e.stderr.decode('utf-8', errors='replace') if e.stderr else ''
+                print(f"{log_prefix} ffmpeg 处理失败: {stderr[:500]}")
+        else:
+            # 无音量调整，仅降采样+编码
+            if temp_wav_path and os.path.exists(temp_wav_path):
+                command = [
+                    'ffmpeg',
+                    '-i', temp_wav_path,
+                    '-af', 'aresample=16000',
+                    '-ac', '1',
+                    '-ar', '16000',
+                    '-c:a', 'libmp3lame',
+                    '-q:a', '2',
+                    '-y',
+                    '-loglevel', 'quiet',
+                    output_path
+                ]
+                try:
+                    subprocess.run(command, check=True, capture_output=True, timeout=600)
+                    os.unlink(temp_wav_path)
+                    temp_wav_path = None
+                    sample_rate = 16000
+                except subprocess.CalledProcessError as e:
+                    stderr = e.stderr.decode('utf-8', errors='replace') if e.stderr else ''
+                    print(f"{log_prefix} 编码失败: {stderr[:500]}")
+            else:
+                # fallback: 从 processed_audio 直接写
+                temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                temp_path = temp_wav.name
+                temp_wav.close()
+
+                import soundfile as sf
+                sf.write(temp_path, processed_audio, sample_rate)
+
+                command = [
+                    'ffmpeg',
+                    '-i', temp_path,
+                    '-af', 'aresample=16000',
+                    '-ac', '1',
+                    '-ar', '16000',
+                    '-c:a', 'libmp3lame',
+                    '-q:a', '2',
+                    '-y',
+                    '-loglevel', 'quiet',
+                    output_path
+                ]
+                subprocess.run(command, check=True, capture_output=True, timeout=600)
+                os.unlink(temp_path)
+                sample_rate = 16000
 
         silence_segments_removed = cycling_stats.get('silence_segments_removed', 0) if cycling_stats else 0
         non_voice_segments_removed = cycling_stats.get('non_voice_segments_removed', 0) if cycling_stats else 0
@@ -323,68 +357,11 @@ def run_audio_pipeline(
             }
         }
 
-        if not adaptive_result['success']:
-            print(f"{log_prefix} 自适应处理失败: {adaptive_result['message']}")
-            return {
-                "success": False,
-                "message": adaptive_result['message'],
-                "file_type": "audio"
-            }
-
-        # 统一输出 MP3 16000Hz 单声道（与基准线格式一致）
         progress_callback('encoding', '正在编码为MP3格式...', 90)
 
-        # 强制输出路径为 .mp3 后缀
-        output_base = os.path.splitext(output_path)[0]
-        if not output_base.endswith('_processed'):
-            output_base = output_base + '_processed'
-        mp3_output_path = output_base + '.mp3'
-        if output_path != mp3_output_path:
-            output_path = mp3_output_path
-
-        output_dir = os.path.dirname(output_path)
-        os.makedirs(output_dir, exist_ok=True)
-
-        # 统一编码参数：MP3, 16000Hz, 单声道
-        encode_sample_rate = 16000
-
-        if temp_wav_path and os.path.exists(temp_wav_path):
-            command = [
-                'ffmpeg',
-                '-i', temp_wav_path,
-                '-ac', '1',
-                '-ar', str(encode_sample_rate),
-                '-c:a', 'libmp3lame',
-                '-q:a', '2',
-                '-y',
-                output_path
-            ]
-
-            subprocess.run(command, check=True, capture_output=True, timeout=600)
-
-            os.unlink(temp_wav_path)
-        else:
-            temp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            temp_path = temp_wav.name
-            temp_wav.close()
-
-            import soundfile as sf
-            sf.write(temp_path, processed_audio, sample_rate)
-
-            command = [
-                'ffmpeg',
-                '-i', temp_path,
-                '-ac', '1',
-                '-ar', str(encode_sample_rate),
-                '-c:a', 'libmp3lame',
-                '-q:a', '2',
-                '-y',
-                output_path
-            ]
-
-            subprocess.run(command, check=True, capture_output=True, timeout=600)
-
-            os.unlink(temp_path)
+        # 清理未使用的临时文件
+        if was_converted_again and os.path.exists(converted_path_again):
+            os.unlink(converted_path_again)
 
         processed_info = get_audio_info(output_path)
         processed_duration = processed_info.get('duration', len(processed_audio) / sample_rate)

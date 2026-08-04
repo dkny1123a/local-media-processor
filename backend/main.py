@@ -13,7 +13,7 @@ from .audio_processor import process_audio
 from .video_processor import process_video, extract_audio_from_video, get_audio_info
 from .utils import cleanup_temp_files, get_file_stats, is_temp_file
 from .denoise_processor import process_denoise
-from .adaptive_processor import process_audio_adaptive, analyze_audio_characteristics, calculate_adaptive_parameters, apply_highpass_filter
+from .adaptive_processor import analyze_audio_characteristics, calculate_adaptive_parameters, apply_highpass_filter
 from .audio_chunk_processor import process_audio_chunks, get_audio_duration
 from .cycling_audio_processor import process_cycling_audio
 from .vad import init_vad
