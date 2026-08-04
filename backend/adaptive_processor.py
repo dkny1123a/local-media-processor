@@ -161,7 +161,7 @@ def calculate_adaptive_parameters(
     min_silence_duration = 0.8
 
     # 目标响度参考值 -16 LUFS（流媒体标准）
-    # 注意：dynaudnorm 不直接使用此值，而是通过 p=0.9/m=20 平滑归一化
+    # 注意：compand+volume 方案不直接使用此值，volume=6dB 固定增益
     # 此值仅用于日志记录和 applied_params 返回
     target_db = -16.0
 

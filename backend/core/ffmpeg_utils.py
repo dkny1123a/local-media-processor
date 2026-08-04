@@ -216,16 +216,17 @@ def apply_loudnorm(
     target_db: float = -16.0,
     timeout: int = FFMPEG_ENCODE_TIMEOUT,
 ) -> bool:
-    # 切换为 dynaudnorm 平滑归一化（无 pumping）
-    # loudnorm dynamic → pumping（单帧增益跳变43dB，人声失真）
-    # dynaudnorm → 高斯平滑增益曲线，>3dB跳变仅0.0%
-    # 滤镜链：highpass(p=2,12dB/oct) → afftdn(nr=12降噪) → dynaudnorm → alimiter(软限制)
-    # target_db 仅用于日志记录，dynaudnorm 通过 p=0.9/m=20 自动归一化
+    # compand 温和压缩 + volume 固定增益（消除爆音破音）
+    # dynaudnorm p=0.9 → 目标峰值-0.92dB → alimiter 持续介入（89%帧>-2dB）→ 爆音破音
+    # compand 仅压缩 -30dB 以上信号，保留动态范围
+    # volume=6dB 固定增益（无动态变化，无 pumping）
+    # alimiter limit=0.707(-3dB) 仅作安全网，正常不介入
     af_str = (
         'highpass=f=80:p=2,'
         'afftdn=nr=12,'
-        'dynaudnorm=f=150:g=15:p=0.9:s=5:m=20,'
-        'alimiter=limit=0.89:level=disabled:attack=5:release=50'
+        'compand=0.1:0.1:-80/-80|-50/-50|-30/-15|-10/-5|0/-3:3:0:-80:0.2,'
+        'volume=6dB,'
+        'alimiter=limit=0.707:level=disabled:attack=10:release=100'
     )
     command = [
         'ffmpeg',

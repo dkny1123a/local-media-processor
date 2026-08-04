@@ -4,7 +4,7 @@
 把同步路径（main.py 的 process_audio_background）和异步路径
 （task_queue.py 的 _execute_audio_processing）共用的核心逻辑提取到这里，
 确保两条路径都走完整的处理流程（scene、自适应参数、自学习、FRCRN、VAD、
-蓝牙优化、dynaudnorm 等）。
+蓝牙优化、compand+volume 等）。
 """
 
 
@@ -241,21 +241,23 @@ def run_audio_pipeline(
         output_dir = os.path.dirname(output_path)
         os.makedirs(output_dir, exist_ok=True)
 
-        # 单 pass dynaudnorm 平滑归一化：
-        # loudnorm dynamic → pumping（单帧增益跳变 43dB，人声失真）
-        # loudnorm linear  → 增益不足（目标-16实际-20，偏差4dB）
-        # dynaudnorm       → 高斯平滑增益曲线，无 pumping（>3dB跳变仅0.0%），响度-19 LUFS
+        # compand 温和压缩 + volume 固定增益：
+        # dynaudnorm p=0.9 → 目标峰值-0.92dB → alimiter 持续介入（89%帧>-2dB）→ 爆音破音
+        # compand 仅压缩 -30dB 以上信号，保留动态范围
+        # volume=6dB 固定增益（无动态变化，无 pumping）
+        # alimiter limit=0.707(-3dB) 仅作安全网，正常不介入
         #
-        # 滤镜链：highpass(p=2,12dB/oct陡截止) → afftdn(nr=12降噪) → dynaudnorm(平滑归一化)
-        #         → aresample(22050Hz) → alimiter(软限制) → MP3 CBR 96kbps
+        # 滤镜链：highpass(p=2,12dB/oct) → afftdn(nr=12降噪) → compand(温和压缩)
+        #         → volume(+6dB) → aresample(22050Hz) → alimiter(-3dB安全网) → MP3 CBR 96kbps
         if max_volume and temp_wav_path:
-            progress_callback('processing', '降噪+响度归一化+编码...', 80)
+            progress_callback('processing', '降噪+压缩+增益+编码...', 80)
             af_str = (
                 'highpass=f=80:p=2,'
                 'afftdn=nr=12,'
-                'dynaudnorm=f=150:g=15:p=0.9:s=5:m=20,'
+                'compand=0.1:0.1:-80/-80|-50/-50|-30/-15|-10/-5|0/-3:3:0:-80:0.2,'
+                'volume=6dB,'
                 'aresample=22050,'
-                'alimiter=limit=0.89:level=disabled:attack=5:release=50'
+                'alimiter=limit=0.707:level=disabled:attack=10:release=100'
             )
             command = [
                 'ffmpeg',
@@ -340,7 +342,7 @@ def run_audio_pipeline(
                 'silence_threshold': silence_threshold,
                 'min_silence_duration': min_silence_duration,
                 'target_db': target_db,
-                'loudnorm_mode': 'dynaudnorm',
+                'loudnorm_mode': 'compand+volume',
                 'stationary_noise': stationary_noise,
                 'highpass_cutoff': highpass_cutoff,
                 'auto_detect': auto_detect,
@@ -403,7 +405,7 @@ def run_audio_pipeline(
                 'min_silence_duration': min_silence_duration,
                 'highpass_cutoff': highpass_cutoff,
                 'target_db': target_db,
-                'loudnorm_mode': 'dynaudnorm',
+                'loudnorm_mode': 'compand+volume',
             }
             processing_result = {
                 'original_duration': original_duration,
