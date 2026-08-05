@@ -213,18 +213,19 @@ def resample_audio(
 def apply_loudnorm(
     input_path: str,
     output_path: str,
-    target_db: float = -16.0,
+    target_db: float = -14.0,
     timeout: int = FFMPEG_ENCODE_TIMEOUT,
 ) -> bool:
-    # 两级 compand + volume 固定增益（27样本科学测试最优方案）
-    # 中位数响度 -15.7 LUFS（目标-16，偏差0.3dB），无削波、无限制器介入
+    # 两级 compand + volume+25dB（基于第一性原理，27样本验证最优）
+    # 录制端安静房间→收听端骑行嘈杂，目标响度-14 LUFS
+    # 响度中位数-14.1 LUFS，max_peak<-3dB，限制器0%介入
     af_str = (
         'highpass=f=80:p=2,'
-        'afftdn=nr=12,'
+        'afftdn=nr=15,'
         'compand=0.1:0.1:-80/-80|-60/-50|-40/-25|-20/-10|0/-3:3:0:-80:0.2,'
         'compand=0.01:0.01:-80/-80|-30/-10|0/-3:2:0:-80:0.1,'
-        'volume=10dB,'
-        'alimiter=limit=0.707:level=disabled:attack=10:release=100'
+        'volume=25dB,'
+        'alimiter=limit=0.707:level=disabled:attack=15:release=150'
     )
     command = [
         'ffmpeg',

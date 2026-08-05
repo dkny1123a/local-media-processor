@@ -160,10 +160,10 @@ def calculate_adaptive_parameters(
     # ============================================================
     min_silence_duration = 0.8
 
-    # 目标响度参考值 -16 LUFS（流媒体标准）
-    # 注意：compand+volume 方案不直接使用此值，volume=6dB 固定增益
-    # 此值仅用于日志记录和 applied_params 返回
-    target_db = -16.0
+    # 目标响度 -14 LUFS（骑行嘈杂环境，非流媒体-16）
+    # 第一性原理：收听端骑行噪声~75dB SPL，需更高响度才能听清
+    # compand+volume 方案不直接使用此值，volume=25dB 固定增益
+    target_db = -14.0
 
     has_low_freq_noise = noise_floor_db > -65
     highpass_cutoff = 150.0 if has_low_freq_noise else 0.0
