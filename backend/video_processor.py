@@ -4,99 +4,10 @@ import numpy as np
 import librosa
 import soundfile as sf
 import tempfile
-import multiprocessing as mp
 from .adaptive_processor import apply_highpass_filter
-from .audio_chunk_processor import process_audio_chunks, load_audio_chunk, get_audio_duration, process_chunk_with_timeout
+from .audio_chunk_processor import process_audio_chunks, load_audio_chunk, get_audio_duration
 from .core import apply_loudnorm, encode_to_mp3, resample_audio
 
-
-def process_chunk_with_timeout(i, audio_chunk, highpass_cutoff, noise_reduction, silence_threshold, min_silence_duration, sample_rate, result_path):
-    try:
-        if highpass_cutoff > 0:
-            audio_chunk = apply_highpass_filter(audio_chunk, sample_rate, highpass_cutoff)
-        
-        if noise_reduction > 0:
-            try:
-                import noisereduce as nr
-                reduced_chunk = nr.reduce_noise(
-                    y=audio_chunk,
-                    sr=sample_rate,
-                    prop_decrease=noise_reduction
-                )
-                audio_chunk = audio_chunk * (1 - noise_reduction) + reduced_chunk * noise_reduction
-            except Exception:
-                pass
-        
-        frame_length = int(sample_rate * 0.02)
-        hop_length = int(sample_rate * 0.01)
-        
-        audio_normalized = audio_chunk / np.max(np.abs(audio_chunk)) if np.max(np.abs(audio_chunk)) > 0 else audio_chunk
-        
-        rms = librosa.feature.rms(y=audio_normalized, frame_length=frame_length, hop_length=hop_length)
-        db = librosa.amplitude_to_db(rms, ref=np.max)
-        
-        silence_mask = db < silence_threshold
-        
-        silence_segments = []
-        in_silence = False
-        start_frame = 0
-        
-        for j, is_silent in enumerate(silence_mask[0]):
-            if is_silent and not in_silence:
-                in_silence = True
-                start_frame = j
-            elif not is_silent and in_silence:
-                in_silence = False
-                end_frame = j
-                duration = (end_frame - start_frame) * hop_length / sample_rate
-                if duration >= min_silence_duration:
-                    silence_segments.append((start_frame * hop_length / sample_rate, 
-                                           end_frame * hop_length / sample_rate))
-        
-        if in_silence:
-            end_frame = len(silence_mask[0])
-            duration = (end_frame - start_frame) * hop_length / sample_rate
-            if duration >= min_silence_duration:
-                silence_segments.append((start_frame * hop_length / sample_rate, 
-                                       len(audio_chunk) / sample_rate))
-        
-        if silence_segments:
-            segments_to_keep = []
-            last_end = 0
-            
-            soft_boundary_ms = 50
-            soft_boundary_samples = int(sample_rate * soft_boundary_ms / 1000)
-            
-            for start, end in sorted(silence_segments):
-                if start > last_end:
-                    segments_to_keep.append((last_end, start))
-                last_end = end
-            
-            if last_end < len(audio_chunk) / sample_rate:
-                segments_to_keep.append((last_end, len(audio_chunk) / sample_rate))
-            
-            if segments_to_keep:
-                result_segments = []
-                for start, end in segments_to_keep:
-                    start_sample = int(start * sample_rate)
-                    end_sample = int(end * sample_rate)
-                    
-                    segment = audio_chunk[start_sample:end_sample]
-                    
-                    if len(segment) > soft_boundary_samples * 2:
-                        fade_in = np.linspace(0, 1, soft_boundary_samples)
-                        fade_out = np.linspace(1, 0, soft_boundary_samples)
-                        
-                        segment[:soft_boundary_samples] = segment[:soft_boundary_samples] * fade_in
-                        segment[-soft_boundary_samples:] = segment[-soft_boundary_samples:] * fade_out
-                    
-                    result_segments.append(segment)
-                
-                audio_chunk = np.concatenate(result_segments)
-        
-        np.save(result_path, audio_chunk)
-    except Exception:
-        np.save(result_path, audio_chunk)
 
 def extract_audio_from_video(video_path, audio_output_path):
     try:
@@ -333,7 +244,9 @@ def process_video(
                 print(f"[Video] 自适应参数: nr={noise_reduction}, hp={highpass_cutoff}, st={silence_threshold}")
             else:
                 highpass_cutoff = 100.0 if scene == 'cycling' else 0.0
-                target_db = -3.0 if scene in ['bluetooth', 'cycling'] else -1.0
+                # 目标响度 -14 LUFS（骑行嘈杂环境，基于第一性原理）
+                # apply_loudnorm 内部固定 volume=25dB，此值仅用于日志
+                target_db = -14.0
             
             update_progress(0.3, '开始分块处理音频...', 'processing')
             
@@ -353,16 +266,19 @@ def process_video(
                 normalized_wav.close()
                 normalized_path = normalized_wav.name
 
+                # apply_loudnorm 内部已包含 aresample=22050，无需再单独降采样
                 success = apply_loudnorm(temp_wav_path, normalized_path, target_db=target_db, timeout=300)
 
                 if success:
                     os.unlink(temp_wav_path)
                     temp_wav_path = normalized_path
+                    sample_rate = 22050  # apply_loudnorm 已降采样至此
+                    print(f"[Video] 响度归一化完成（含降采样至22050Hz）")
                 else:
                     if os.path.exists(normalized_path):
                         os.unlink(normalized_path)
-            
-            if scene in ['cycling', 'cycling_bluetooth', 'bluetooth'] and temp_wav_path:
+            elif scene in ['cycling', 'cycling_bluetooth', 'bluetooth'] and temp_wav_path:
+                # max_volume=False 时，apply_loudnorm 未执行，需单独降采样
                 update_progress(0.88, '降采样至22.05kHz...', 'processing')
                 optimized_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
                 optimized_wav.close()
